@@ -4,6 +4,10 @@ Record a voice note and drop the MP3 player **right where you started recording*
 
 Press `Alt+R`, talk, press `Alt+R` again. The recording is encoded to MP3 inside Obsidian (no ffmpeg, no Python, no cloud), saved into your vault, and the audio player is inserted automatically at the cursor — or as a playable element in the middle of your drawing.
 
+![The VoiceComment audio player inserted inside an Excalidraw drawing, showing the file name and its duration](./images/excalidraw-player.png)
+
+*The player VoiceComment inserts into an Excalidraw drawing: the file it just recorded, playable from the scene.*
+
 ## Why
 
 Neither Excalidraw nor its Obsidian plugin can record audio, and even embedding an existing audio file in a drawing is a manual workaround. [Issue #2278](https://github.com/zsviczian/obsidian-excalidraw-plugin/issues/2278) is still open, and the plugin's author suggests working around it by adding a card and dropping the audio link into it. VoiceComment does exactly that — automatically, with the recording included.
