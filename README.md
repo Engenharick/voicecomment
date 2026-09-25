@@ -2,7 +2,7 @@
 
 Record a voice note and drop the MP3 player **right where you started recording** — in a Markdown note, or inside an Excalidraw drawing.
 
-Press `Alt+R`, talk, press `Alt+R` again. The recording is encoded to MP3 inside Obsidian (no ffmpeg, no Python, no cloud), saved into your vault, and the audio player is inserted automatically at the cursor — or as a playable element in the middle of your drawing.
+Assign a shortcut to *VoiceComment: Start/stop recording* (Settings → Hotkeys) — `Alt+R` is a good one — talk, then press it again. The plugin deliberately ships **no default hotkey**, so it never steals a key you already use. The recording is encoded to MP3 inside Obsidian (no ffmpeg, no Python, no cloud), saved into your vault, and the audio player is inserted automatically at the cursor — or as a playable element in the middle of your drawing.
 
 ![The VoiceComment audio player inserted inside an Excalidraw drawing, showing the file name and its duration](./images/excalidraw-player.png)
 
@@ -14,7 +14,7 @@ Neither Excalidraw nor its Obsidian plugin can record audio, and even embedding 
 
 ## Features
 
-- 🎙️ One shortcut for everything: `Alt+R` starts and stops
+- 🎙️ One shortcut for everything — bind a key once (say `Alt+R`) and it starts and stops from anywhere
 - 📝 Works in Markdown notes — inserts `![[audio.mp3]]` at the cursor
 - ✏️ Works inside Excalidraw drawings — inserts a real, playable player element in the scene
 - 💾 MP3 written straight to your vault, with **no external tools**: the encoder ships inside the plugin
@@ -46,9 +46,9 @@ Download `main.js`, `manifest.json` and `styles.css` from the [latest release](h
 ## Usage
 
 1. Open a note (in edit mode) **or** an Excalidraw drawing.
-2. Press `Alt+R` — or click the microphone in the sidebar, or run *VoiceComment: Start/stop recording* from the command palette.
+2. Press your shortcut — or click the microphone in the sidebar, or run *VoiceComment: Start/stop recording* from the command palette. No shortcut yet? Assign one in Settings → Hotkeys.
 3. Talk. The panel shows the timer, the level meter, and the file being recorded into.
-4. Press `Alt+R` again (or ■ in the panel) to stop and save.
+4. Press the shortcut again (or ■ in the panel) to stop and save.
 
 | Where you record | What appears |
 |---|---|
@@ -56,6 +56,8 @@ Download `main.js`, `manifest.json` and `styles.css` from the [latest release](h
 | Excalidraw drawing | a player element in the middle of the view, selected and ready to play |
 
 Autoplay is disabled by the browser (see [#1657](https://github.com/zsviczian/obsidian-excalidraw-plugin/issues/1657)), so you press play once.
+
+Without the Excalidraw plugin there is nothing to draw into, so recording with a drawing open simply inserts the audio into that note instead. Nothing breaks — the file is always saved.
 
 ## Settings
 
@@ -70,7 +72,7 @@ Autoplay is disabled by the browser (see [#1657](https://github.com/zsviczian/ob
 
 ## Troubleshooting
 
-- **Nothing happens on `Alt+R`**: another plugin may own that shortcut. Reassign it in Settings → Hotkeys → search "VoiceComment".
+- **Nothing happens on your shortcut**: it may never have been assigned (the plugin ships none), or another plugin owns it. Assign it in Settings → Hotkeys → search "VoiceComment".
 - **"microphone permission denied"**: allow microphone access for Obsidian in your OS privacy settings, then try again.
 - **"nothing was recorded"**: open the diagnostic log. It records the AudioContext state, the captured byte counts and the peak level of every recording.
 - **The player shows up as an empty box in a drawing**: it was inserted but not activated. It renders as soon as you select it.
