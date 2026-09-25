@@ -826,7 +826,6 @@ class VoiceCommentPlugin extends Plugin {
 		this.addCommand({
 			id: "start-stop-recording",
 			name: "Start/stop recording",
-			hotkeys: [{ modifiers: ["Alt"], key: "r" }],
 			callback: () => this.toggleRecording(),
 		});
 		this.addCommand({
@@ -877,11 +876,25 @@ class VoiceCommentPlugin extends Plugin {
 	}
 
 	async log(message) {
-		const line = `[${timestamp()}] ${message}`;
-		console.log(`VoiceComment: ${message}`);
+		await this.appendLog(`[${timestamp()}] ${message}`);
+	}
+
+	// Only real failures reach the developer console; routine entries stay in the file.
+	async logError(message, error) {
+		const detail = error && error.stack ? error.stack : error;
+		console.error(`VoiceComment: ${message}`, detail === undefined ? "" : detail);
+		await this.appendLog(`[${timestamp()}] ${message} ${detail === undefined ? "" : detail}`);
+	}
+
+	async appendLog(line) {
 		try {
 			const adapter = this.app.vault.adapter;
-			const info = await adapter.stat(LOG_PATH).catch(() => null);
+			let info = null;
+			try {
+				info = await adapter.stat(LOG_PATH);
+			} catch (error) {
+				info = null;
+			}
 			if (info && info.size > LOG_MAX_BYTES) await adapter.write(LOG_PATH, "");
 			await adapter.append(LOG_PATH, `${line}\n`);
 		} catch (error) { /* the log must never get in the way of the plugin */ }
@@ -938,7 +951,7 @@ class VoiceCommentPlugin extends Plugin {
 			if (this.recorder.active) await this.stopRecording(true);
 			else await this.startRecording();
 		} catch (error) {
-			await this.log("error in toggleRecording: " + (error && error.stack ? error.stack : error));
+			await this.logError("error in toggleRecording: " + (error && error.stack ? error.stack : error));
 			new Notice(`VoiceComment: unexpected error (see ${LOG_PATH}).`);
 		}
 	}
@@ -957,7 +970,7 @@ class VoiceCommentPlugin extends Plugin {
 		try {
 			await this.recorder.start(this.settings.bitrate);
 		} catch (error) {
-			await this.log("microphone failure: " + (error && error.stack ? error.stack : error));
+			await this.logError("microphone failure: " + (error && error.stack ? error.stack : error));
 			if (error && error.name === "NotAllowedError") {
 				new Notice("VoiceComment: microphone permission denied. Allow microphone access for Obsidian.");
 			} else if (error && error.name === "NotFoundError") {
@@ -988,7 +1001,7 @@ class VoiceCommentPlugin extends Plugin {
 		try {
 			result = save ? await this.recorder.stop() : (this.recorder.discard(), null);
 		} catch (error) {
-			await this.log("error stopping the recording: " + (error && error.stack ? error.stack : error));
+			await this.logError("error stopping the recording: " + (error && error.stack ? error.stack : error));
 		}
 		this.panel.hide();
 		this.statusBar.setText("");
@@ -1008,7 +1021,7 @@ class VoiceCommentPlugin extends Plugin {
 			await this.log(`saved: ${file.path} (${result.data.byteLength}B via ${result.source}) ${destination}`);
 			new Notice(`VoiceComment: ${file.name} (${formatDuration(result.durationMs)}) ${destination}`);
 		} catch (error) {
-			await this.log("error saving/inserting: " + (error && error.stack ? error.stack : error));
+			await this.logError("error saving/inserting: " + (error && error.stack ? error.stack : error));
 			new Notice("VoiceComment: could not save the recording.");
 		}
 	}
@@ -1042,13 +1055,9 @@ class VoiceCommentPlugin extends Plugin {
 
 	measureAudioPlayerHeight() {
 		try {
-			const probe = document.createElement("audio");
+			const probe = document.body.createEl("audio", { cls: "voicecomment-probe" });
 			probe.controls = true;
 			probe.src = SILENT_WAV;
-			probe.style.position = "fixed";
-			probe.style.left = "-10000px";
-			probe.style.width = `${EMBED_WIDTH}px`;
-			document.body.appendChild(probe);
 			const height = probe.offsetHeight;
 			probe.remove();
 			return height > 0 ? height : 54;
@@ -1073,7 +1082,7 @@ class VoiceCommentPlugin extends Plugin {
 		try {
 			ea = automate.getAPI(leaf.view);
 		} catch (error) {
-			await this.log("could not get the Excalidraw API: " + (error && error.message ? error.message : error));
+			await this.logError("could not get the Excalidraw API: " + (error && error.message ? error.message : error));
 		}
 		if (!ea) return false;
 
@@ -1112,12 +1121,12 @@ class VoiceCommentPlugin extends Plugin {
 						captureUpdate: "NEVER",
 					});
 				} catch (error) {
-					await this.log("inserted into the drawing, but could not activate the player: " + (error && error.message ? error.message : error));
+					await this.logError("inserted into the drawing, but could not activate the player: " + (error && error.message ? error.message : error));
 				}
 			}
 			return true;
 		} catch (error) {
-			await this.log("failed to insert into the drawing: " + (error && error.stack ? error.stack : error));
+			await this.logError("failed to insert into the drawing: " + (error && error.stack ? error.stack : error));
 			return false;
 		} finally {
 			if (typeof ea.destroy === "function") ea.destroy();

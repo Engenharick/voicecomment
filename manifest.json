@@ -1,10 +1,10 @@
 {
   "id": "voicecomment",
   "name": "VoiceComment",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "1.4.0",
   "description": "Record voice notes as MP3 and insert the player right where you started recording: in a note, or inside an Excalidraw drawing.",
   "author": "Engenharick",
   "authorUrl": "https://github.com/Engenharick",
-  "isDesktopOnly": false
+  "isDesktopOnly": true
 }

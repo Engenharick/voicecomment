@@ -25,6 +25,19 @@ if (!source.includes('addEmbeddable')) failures.push('addEmbeddable insertion pr
 if (!source.includes('activeEmbeddable')) failures.push('activeEmbeddable activation present');
 if (!source.includes('voicecomment.log')) failures.push('diagnostic log path present');
 
+// --- Obsidian community directory: submission requirements and guidelines ---
+const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'manifest.json'), 'utf8'));
+const pluginCode = source.slice(source.indexOf('const obsidian = require("obsidian")'));
+if (manifest.id !== 'voicecomment') failures.push('manifest.id must be "voicecomment"');
+if (!/^\d+\.\d+\.\d+$/.test(manifest.version)) failures.push('manifest.version must be x.y.z');
+if (manifest.description.length > 250) failures.push('manifest description must be <= 250 characters');
+if (!manifest.description.endsWith('.')) failures.push('manifest description must end with a period');
+if (/[^\x20-\x7E]/.test(manifest.description)) failures.push('manifest description must have no emoji or special characters');
+if ('fundingUrl' in manifest) failures.push('no fundingUrl unless donations are accepted');
+if (pluginCode.includes('require("electron")') && manifest.isDesktopOnly !== true) failures.push('Electron API requires isDesktopOnly: true');
+if (/\bconsole\.log\b/.test(pluginCode)) failures.push('no console.log in plugin code (only errors belong in the console)');
+if (/\bhotkeys:\s*\[/.test(pluginCode)) failures.push('no default hotkey in addCommand (it conflicts with user hotkeys)');
+
 // Same shape as Obsidian's plugin loader: CommonJS with a controlled require.
 const factory = new Function(
 	'require',

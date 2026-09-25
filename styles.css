@@ -85,3 +85,10 @@
 .voicecomment-statusbar.is-recording {
 	color: var(--text-error);
 }
+
+/* Offscreen probe: measures the height of the native audio player. */
+.voicecomment-probe {
+	position: fixed;
+	left: -10000px;
+	width: 500px;
+}

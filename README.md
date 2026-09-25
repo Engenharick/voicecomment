@@ -17,11 +17,11 @@ Neither Excalidraw nor its Obsidian plugin can record audio, and even embedding 
 - ⏸️ Pause/resume, live level meter, timer, discard
 - 📊 Status bar indicator and a floating panel showing which file you are recording into
 - 🔒 100% local — nothing leaves your machine
-- 🌍 Desktop and mobile
+- 🖥️ Desktop version of Obsidian
 
 ## Requirements
 
-- Obsidian 1.4.0 or newer
+- Obsidian 1.4.0 or newer, **desktop version** — the plugin opens its diagnostic log through Obsidian's Electron API, so it is marked desktop-only
 - A microphone, and permission for Obsidian to use it
 - For the drawing part: the [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) plugin, version 2.x
 
