@@ -2,3 +2,7 @@ node_modules/
 *.log
 .DS_Store
 tools/out/
+
+# Material interno de divulgacao (textos, capturas, scripts de apoio).
+# Nao faz parte do plugin e nao deve ir para o repositorio publico.
+divulgacao/

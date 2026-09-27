@@ -4,9 +4,13 @@ Record a voice note and drop the MP3 player **right where you started recording*
 
 Assign a shortcut to *VoiceComment: Start/stop recording* (Settings → Hotkeys) — `Alt+R` is a good one — talk, then press it again. The plugin deliberately ships **no default hotkey**, so it never steals a key you already use. The recording is encoded to MP3 inside Obsidian (no ffmpeg, no Python, no cloud), saved into your vault, and the audio player is inserted automatically at the cursor — or as a playable element in the middle of your drawing.
 
+![Recording a voice comment on an Excalidraw drawing: the audio player sits on the canvas next to the sketch, with the workspace panels open](./images/excalidraw-voice-comment.png)
+
+*A voice comment on a drawing. One shortcut, talk, and the player lands on the canvas - here sitting in the room the comment is about, with an arrow drawn to the kitchen it explains.*
+
 ![The VoiceComment audio player inserted inside an Excalidraw drawing, showing the file name and its duration](./images/excalidraw-player.png)
 
-*The player VoiceComment inserts into an Excalidraw drawing: the file it just recorded, playable from the scene.*
+*Closer look at the player: the file it just recorded, playable from the scene.*
 
 ## Why
 
@@ -31,9 +35,9 @@ Neither Excalidraw nor its Obsidian plugin can record audio, and even embedding 
 
 ## Installation
 
-### Community plugins (once approved)
+### Community plugins
 
-Settings → Community plugins → Browse → search "VoiceComment".
+Settings → Community plugins → Browse → search "VoiceComment" → **Install** → **Enable**. The plugin is listed in the official community directory, so this is all it takes.
 
 ### BRAT
 
