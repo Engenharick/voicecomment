@@ -16,6 +16,8 @@ Assign a shortcut to *VoiceComment: Start/stop recording* (Settings → Hotkeys)
 
 Neither Excalidraw nor its Obsidian plugin can record audio, and even embedding an existing audio file in a drawing is a manual workaround. [Issue #2278](https://github.com/zsviczian/obsidian-excalidraw-plugin/issues/2278) is still open, and the plugin's author suggests working around it by adding a card and dropping the audio link into it. VoiceComment does exactly that — automatically, with the recording included.
 
+VoiceComment is where the two meet: Obsidian records the voice, the Excalidraw canvas gives it a place. The comment stops being a file that sits somewhere else and becomes part of the drawing itself - the creative value the two add together, which neither reaches alone.
+
 ## Features
 
 - 🎙️ One shortcut for everything — bind a key once (say `Alt+R`) and it starts and stops from anywhere
@@ -54,7 +56,7 @@ Download `main.js`, `manifest.json` and `styles.css` from the [latest release](h
 3. Talk. The panel shows the timer, the level meter, and the file being recorded into.
 4. Press the shortcut again (or ■ in the panel) to stop and save.
 
-**No hotkey needed.** Click the microphone in the sidebar to start and stop, so the mouse alone is enough. Comment on whatever you are working on, and record as many audios as you want - one comment per idea you still want to develop, each player dropped where you were.
+**No hotkey needed.** Click the microphone in the sidebar to start and stop, so the mouse alone is enough. Comment on whatever you are working on, and record as many audios as you want - one comment per idea you still want to develop, each player dropped where you were. With a drawing open, that same click is what puts the player into the Excalidraw scene - the recorder is Obsidian's, the place is the drawing's.
 
 | Where you record | What appears |
 |---|---|
