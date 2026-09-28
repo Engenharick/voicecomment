@@ -54,6 +54,8 @@ Download `main.js`, `manifest.json` and `styles.css` from the [latest release](h
 3. Talk. The panel shows the timer, the level meter, and the file being recorded into.
 4. Press the shortcut again (or ■ in the panel) to stop and save.
 
+**No hotkey needed.** Click the microphone in the sidebar to start and stop, so the mouse alone is enough. Comment on whatever you are working on, and record as many audios as you want - one comment per idea you still want to develop, each player dropped where you were.
+
 | Where you record | What appears |
 |---|---|
 | Markdown note | `![[VoiceComment 2026-09-25 18.20.33.mp3]]` at the cursor |
