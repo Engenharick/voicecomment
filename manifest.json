@@ -1,9 +1,9 @@
 {
   "id": "voicecomment",
   "name": "VoiceComment",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "minAppVersion": "1.4.0",
-  "description": "Record voice notes as MP3 and drop the player exactly where you started: at the cursor in a note, or inside an Excalidraw drawing. Audio comments for drawings, fully local - no ffmpeg, no Python, no cloud.",
+  "description": "Record voice notes as MP3 and drop the player exactly where you started: at the note cursor, or inside an Excalidraw drawing. Obsidian's recorder and the Excalidraw canvas joined in one element - one comment per idea, no ffmpeg, no cloud.",
   "author": "Engenharick",
   "authorUrl": "https://github.com/Engenharick",
   "isDesktopOnly": true
