@@ -33,6 +33,7 @@ if (!/^\d+\.\d+\.\d+$/.test(manifest.version)) failures.push('manifest.version m
 if (manifest.description.length > 250) failures.push('manifest description must be <= 250 characters');
 if (!manifest.description.endsWith('.')) failures.push('manifest description must end with a period');
 if (/[^\x20-\x7E]/.test(manifest.description)) failures.push('manifest description must have no emoji or special characters');
+if (/\bObsidian\b/i.test(manifest.description)) failures.push('manifest description must not use the word "Obsidian" (redundant in the directory; the review fails on it)');
 if ('fundingUrl' in manifest) failures.push('no fundingUrl unless donations are accepted');
 if (pluginCode.includes('require("electron")') && manifest.isDesktopOnly !== true) failures.push('Electron API requires isDesktopOnly: true');
 if (/\bconsole\.log\b/.test(pluginCode)) failures.push('no console.log in plugin code (only errors belong in the console)');
