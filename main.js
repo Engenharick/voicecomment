@@ -864,12 +864,35 @@ class VoiceCommentPlugin extends Plugin {
 				return true;
 			},
 		});
+		this.addCommand({
+			id: "activate-latest-player",
+			name: "Activate the latest player in the drawing",
+			checkCallback: (checking) => {
+				const leaf = this.app.workspace.activeLeaf;
+				const inDrawing = !!(leaf && leaf.view && typeof leaf.view.getViewType === "function"
+					&& leaf.view.getViewType() === "excalidraw");
+				if (!inDrawing) return false;
+				if (!checking) this.activateLatestPlayer();
+				return true;
+			},
+		});
+
+		// Excalidraw renders an embeddable only while it is the active one, and that
+		// state is not restored when a drawing is reopened — the player falls back to
+		// a placeholder until it is clicked. Re-activate the newest player whenever a
+		// drawing becomes the active view.
+		this.playerTimer = null;
+		this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.schedulePlayerActivation()));
+		this.registerEvent(this.app.workspace.on("layout-change", () => this.schedulePlayerActivation()));
+		this.schedulePlayerActivation();
 
 		this.registerInterval(window.setInterval(() => this.tick(), 60));
 		this.log("plugin loaded");
 	}
 
 	onunload() {
+		if (this.playerTimer) window.clearTimeout(this.playerTimer);
+		this.playerTimer = null;
 		this.recorder.discard();
 		this.panel.destroy();
 		this.statusBar.setText("");
@@ -1063,6 +1086,63 @@ class VoiceCommentPlugin extends Plugin {
 			return height > 0 ? height : 54;
 		} catch (error) {
 			return 54;
+		}
+	}
+
+	schedulePlayerActivation(delay = 800) {
+		if (this.playerTimer) window.clearTimeout(this.playerTimer);
+		this.playerTimer = window.setTimeout(() => {
+			this.playerTimer = null;
+			this.activateLatestPlayer();
+		}, delay);
+	}
+
+	// Excalidraw keeps a single active embeddable (appState.activeEmbeddable), so
+	// only one player can render at a time: the newest one wins. Returns 1 when a
+	// player was activated, 0 when there was nothing to do.
+	async activateLatestPlayer() {
+		const leaf = this.app.workspace.activeLeaf;
+		if (!leaf || !leaf.view || typeof leaf.view.getViewType !== "function") return 0;
+		if (leaf.view.getViewType() !== "excalidraw") return 0;
+		const automate = window.ExcalidrawAutomate;
+		if (!automate || typeof automate.getAPI !== "function") return 0;
+
+		let ea = null;
+		try {
+			ea = automate.getAPI(leaf.view);
+		} catch (error) {
+			return 0;
+		}
+		if (!ea) return 0;
+
+		try {
+			const prefix = `${this.settings.prefix || DEFAULT_SETTINGS.prefix} `;
+			const players = (typeof ea.getViewElements === "function" ? ea.getViewElements() : [])
+				.filter((item) => item && item.type === "embeddable" && typeof item.link === "string"
+					&& /\.mp3\]\]$/i.test(item.link) && item.link.includes(prefix));
+			if (!players.length) return 0;
+
+			players.sort((a, b) => (a.link < b.link ? 1 : -1));
+			const player = players[0];
+			const api = (typeof ea.getExcalidrawAPI === "function" ? ea.getExcalidrawAPI() : null) || leaf.view.excalidrawAPI;
+			if (!api || typeof api.updateScene !== "function") return 0;
+
+			// Never fight the user's own selection: select the player only when
+			// nothing else is selected.
+			const state = typeof api.getAppState === "function" ? api.getAppState() : null;
+			const hasSelection = !!(state && state.selectedElementIds && Object.keys(state.selectedElementIds).length > 0);
+			if (!hasSelection && typeof api.selectElements === "function") api.selectElements([player]);
+
+			api.updateScene({
+				appState: { activeEmbeddable: { element: player, state: "active" } },
+				captureUpdate: "NEVER",
+			});
+			return 1;
+		} catch (error) {
+			await this.logError("could not re-activate the player in the drawing: " + (error && error.message ? error.message : error));
+			return 0;
+		} finally {
+			if (typeof ea.destroy === "function") ea.destroy();
 		}
 	}
 
