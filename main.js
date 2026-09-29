@@ -332,7 +332,7 @@ a.length>D&&(D=a.length,p=0|1.25*D+7200,r=new Int8Array(p));a=u.lame_encode_buff
  *      and re-encoded, so a recording is never lost)
  */
 const obsidian = require("obsidian");
-const { Plugin, PluginSettingTab, Setting, Notice, MarkdownView, normalizePath, setIcon } = obsidian;
+const { Plugin, PluginSettingTab, Setting, Notice, MarkdownView, TFile, normalizePath, setIcon } = obsidian;
 
 const DEFAULT_SETTINGS = {
 	folder: "VoiceComment",
@@ -876,15 +876,70 @@ class VoiceCommentPlugin extends Plugin {
 				return true;
 			},
 		});
+		this.addCommand({
+			id: "show-player-filenames",
+			name: "Show the file name on every player in the drawing",
+			checkCallback: (checking) => {
+				const leaf = this.app.workspace.activeLeaf;
+				const inDrawing = !!(leaf && leaf.view && typeof leaf.view.getViewType === "function"
+					&& leaf.view.getViewType() === "excalidraw");
+				if (!inDrawing) return false;
+				if (!checking) this.showPlayerFileNames();
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "open-recordings-window",
+			name: "Open this drawing's recordings in a floating window",
+			checkCallback: (checking) => {
+				if (!this.app.workspace.getActiveFile()) return false;
+				if (!checking) this.openRecordingsWindow();
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "recreate-players",
+			name: "Recreate the players in the drawing (re-render)",
+			checkCallback: (checking) => {
+				const leaf = this.app.workspace.activeLeaf;
+				const inDrawing = !!(leaf && leaf.view && typeof leaf.view.getViewType === "function"
+					&& leaf.view.getViewType() === "excalidraw");
+				if (!inDrawing) return false;
+				if (!checking) this.recreatePlayers();
+				return true;
+			},
+		});
+
+		// Clicking a player needs no code: Excalidraw's own behaviour opens the linked mp3, so a
+		// click plays that recording. Reloading the view here only blinked the screen and fought
+		// the user's choice, so there is no pointer handler any more.
 
 		// Excalidraw renders an embeddable only while it is the active one, and that
 		// state is not restored when a drawing is reopened — the player falls back to
 		// a placeholder until it is clicked. Re-activate the newest player whenever a
 		// drawing becomes the active view.
 		this.playerTimer = null;
-		this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.schedulePlayerActivation()));
+		// file-open fires before the drawing view renders its scene, so acting there with no
+		// delay is the earliest chance to mark a player active *before* Excalidraw builds the
+		// embeddables — the later the marker lands, the less likely it is to be honored.
+		this.registerEvent(this.app.workspace.on("file-open", () => this.schedulePlayerActivation(0)));
+		this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.schedulePlayerActivation(0)));
 		this.registerEvent(this.app.workspace.on("layout-change", () => this.schedulePlayerActivation()));
-		this.schedulePlayerActivation();
+		this.schedulePlayerActivation(0);
+
+		// The global ExcalidrawAutomate may not exist yet when this plugin loads (load order),
+		// so keep trying for a minute: until the hook is installed, a drawing that opens later
+		// cannot have its players recreated inside the Excalidraw load cycle.
+		this.hookTimer = null;
+		if (!this.installFileOpenHook()) {
+			let tentativas = 0;
+			this.hookTimer = window.setInterval(() => {
+				if (this.installFileOpenHook() || ++tentativas > 30) {
+					window.clearInterval(this.hookTimer);
+					this.hookTimer = null;
+				}
+			}, 2000);
+		}
 
 		this.registerInterval(window.setInterval(() => this.tick(), 60));
 		this.log("plugin loaded");
@@ -893,6 +948,10 @@ class VoiceCommentPlugin extends Plugin {
 	onunload() {
 		if (this.playerTimer) window.clearTimeout(this.playerTimer);
 		this.playerTimer = null;
+		if (this.playerRetry) window.clearTimeout(this.playerRetry);
+		this.playerRetry = null;
+		if (this.hookTimer) window.clearInterval(this.hookTimer);
+		this.hookTimer = null;
 		this.recorder.discard();
 		this.panel.destroy();
 		this.statusBar.setText("");
@@ -1091,19 +1150,40 @@ class VoiceCommentPlugin extends Plugin {
 
 	schedulePlayerActivation(delay = 800) {
 		if (this.playerTimer) window.clearTimeout(this.playerTimer);
+		if (this.playerRetry) window.clearTimeout(this.playerRetry);
+		this.playerRetry = null;
 		this.playerTimer = window.setTimeout(() => {
 			this.playerTimer = null;
-			this.activateLatestPlayer();
+			this.activatePlayerWithRetries(0);
 		}, delay);
+	}
+
+	// A drawing that Obsidian reopens on startup is not ready yet when the workspace
+	// events fire, so keep trying for a few seconds instead of giving up silently.
+	async activatePlayerWithRetries(attempt) {
+		const activated = await this.activateLatestPlayer();
+		if (activated || attempt >= 6) return activated;
+		if (this.playerRetry) window.clearTimeout(this.playerRetry);
+		this.playerRetry = window.setTimeout(() => {
+			this.playerRetry = null;
+			this.activatePlayerWithRetries(attempt + 1);
+		}, 1500);
+		return 0;
 	}
 
 	// Excalidraw keeps a single active embeddable (appState.activeEmbeddable), so
 	// only one player can render at a time: the newest one wins. Returns 1 when a
-	// player was activated, 0 when there was nothing to do.
+	// player is active, 0 when there is nothing to do yet (the caller retries).
 	async activateLatestPlayer() {
 		const leaf = this.app.workspace.activeLeaf;
 		if (!leaf || !leaf.view || typeof leaf.view.getViewType !== "function") return 0;
-		if (leaf.view.getViewType() !== "excalidraw") return 0;
+		if (leaf.view.getViewType() !== "excalidraw") {
+			// Leaving the drawing resets the visit marker, so coming back — or reopening
+			// the note later — runs the activation pass (and the cycle) again.
+			this.cycledView = null;
+			this.cycledFile = null;
+			return 0;
+		}
 		const automate = window.ExcalidrawAutomate;
 		if (!automate || typeof automate.getAPI !== "function") return 0;
 
@@ -1122,25 +1202,266 @@ class VoiceCommentPlugin extends Plugin {
 					&& /\.mp3\]\]$/i.test(item.link) && item.link.includes(prefix));
 			if (!players.length) return 0;
 
+			// Self-healing: keep the file name turned on inside every player, so the
+			// label survives whatever Excalidraw does with the rest of the scene.
+			await this.showPlayerFileNames();
+
 			players.sort((a, b) => (a.link < b.link ? 1 : -1));
 			const player = players[0];
 			const api = (typeof ea.getExcalidrawAPI === "function" ? ea.getExcalidrawAPI() : null) || leaf.view.excalidrawAPI;
 			if (!api || typeof api.updateScene !== "function") return 0;
 
-			// Never fight the user's own selection: select the player only when
-			// nothing else is selected.
 			const state = typeof api.getAppState === "function" ? api.getAppState() : null;
-			const hasSelection = !!(state && state.selectedElementIds && Object.keys(state.selectedElementIds).length > 0);
-			if (!hasSelection && typeof api.selectElements === "function") api.selectElements([player]);
-
-			api.updateScene({
-				appState: { activeEmbeddable: { element: player, state: "active" } },
-				captureUpdate: "NEVER",
-			});
-			return 1;
+			const active = state && state.activeEmbeddable && state.activeEmbeddable.element;
+			// Never fight an active player, and never touch the scene here: the render comes from
+			// onFileOpenHook, and an updateScene with the whole scene made the plugin rebuild the
+			// view (the "Cannot read properties of null (reading 'snapshot')" errors in the log).
+			if (active) return 1;
+			return 0;
 		} catch (error) {
 			await this.logError("could not re-activate the player in the drawing: " + (error && error.message ? error.message : error));
 			return 0;
+		} finally {
+			if (typeof ea.destroy === "function") ea.destroy();
+		}
+	}
+
+	// The player cannot live inside the canvas: Excalidraw mounts an embeddable only while
+	// it is the active one, so reopening a drawing turns every player into a box. A real
+	// Obsidian window has no such limit — the native audio player always renders there.
+	// This builds (or refreshes) a companion note with every recording of the active file
+	// and opens it in a popout window, which can be dragged around like any other window.
+	async openRecordingsWindow() {
+		const file = this.app.workspace.getActiveFile();
+		if (!file || file.extension !== "md") {
+			new Notice("VoiceComment: abra a nota do desenho antes de pedir a janela de audios.");
+			return 0;
+		}
+
+		const content = await this.app.vault.read(file);
+		const prefix = `${this.settings.prefix || DEFAULT_SETTINGS.prefix} `;
+		const links = [];
+		for (const match of content.matchAll(/\[\[([^\]]+)\]\]/g)) {
+			const link = match[1];
+			if (!/\.mp3$/i.test(link)) continue;
+			const nome = link.split("/").pop();
+			if (!nome.startsWith(prefix)) continue;
+			if (!links.includes(link)) links.push(link);
+		}
+		if (!links.length) {
+			new Notice("VoiceComment: nenhuma gravacao encontrada nesta nota.");
+			return 0;
+		}
+
+		const marca = "%% VoiceComment: lista de audios gerada automaticamente %%";
+		const linhas = [marca, "", `# Áudios de ${file.basename}`, ""];
+		linhas.push(`**${links.length}** gravação(ões) do VoiceComment em \`${file.path}\`.`);
+		for (const link of links) {
+			linhas.push("", `## 🎙 ${link.split("/").pop()}`, "", `![[${link}]]`);
+		}
+		const texto = linhas.join("\n") + "\n";
+
+		const pasta = file.parent && file.parent.path && file.parent.path !== "/" ? `${file.parent.path}/` : "";
+		const destino = normalizePath(`${pasta}${file.basename} - áudios.md`);
+		let nota = this.app.vault.getAbstractFileByPath(destino);
+		if (nota instanceof TFile) {
+			const atual = await this.app.vault.read(nota);
+			if (!atual.startsWith(marca)) {
+				new Notice(`VoiceComment: ${destino} já existe e não é meu — não vou sobrescrever.`);
+				return 0;
+			}
+			await this.app.vault.modify(nota, texto);
+		} else {
+			nota = await this.app.vault.create(destino, texto);
+		}
+		if (!(nota instanceof TFile)) return 0;
+
+		const leaf = this.app.workspace.openPopoutLeaf();
+		if (leaf) await leaf.openFile(nota);
+		await this.log(`opened the recordings window for ${file.path} (${links.length} audio(s))`);
+		return links.length;
+	}
+
+	// The Excalidraw plugin mounts an embeddable when the element is CREATED, so the way to
+	// bring a player back is to recreate the element: delete the original and add a fresh one
+	// carrying over geometry, colours, link and mdProps. Same replace pattern the Excalidraw
+	// plugin itself uses when it converts an element.
+	async recreatePlayersIn(ea, somenteId) {
+		if (!ea || typeof ea.addEmbeddable !== "function" || typeof ea.getViewElements !== "function") return 0;
+		const prefix = `${this.settings.prefix || DEFAULT_SETTINGS.prefix} `;
+		const achar = () => ea.getViewElements().filter((item) => item && item.type === "embeddable"
+			&& typeof item.link === "string" && /\.mp3\]\]$/i.test(item.link) && item.link.includes(prefix));
+		const alvos = () => {
+			const todos = achar();
+			return somenteId ? todos.filter((item) => item.id === somenteId) : todos;
+		};
+
+		// Inside onFileOpenHook the hook fires before the React canvas commits, so the view is
+		// still empty at that instant. The plugin awaits this hook, so waiting here is safe:
+		// the recreate then lands before the canvas paints — the only window that mounts.
+		let players = alvos();
+		for (let tentativa = 0; !players.length && tentativa < 14; tentativa++) {
+			await new Promise((resolve) => window.setTimeout(resolve, 150));
+			players = alvos();
+		}
+		if (!players.length) return 0;
+
+		const links = players.map((item) => item.link);
+		if (typeof ea.copyViewElementsToEAforEditing === "function") {
+			ea.copyViewElementsToEAforEditing(players);
+			for (const player of players) {
+				const copia = ea.getElement(player.id);
+				if (copia) copia.isDeleted = true;
+			}
+		}
+		let recriados = 0;
+		for (const player of players) {
+			if (typeof ea.setStyle === "function") {
+				ea.setStyle({
+					strokeColor: player.strokeColor,
+					backgroundColor: player.backgroundColor,
+					fillStyle: player.fillStyle,
+					strokeWidth: player.strokeWidth,
+					strokeStyle: player.strokeStyle,
+					roughness: player.roughness,
+					opacity: player.opacity,
+				});
+			}
+			const mdProps = player.customData && player.customData.mdProps ? player.customData.mdProps : undefined;
+			const novoId = ea.addEmbeddable(player.x, player.y, player.width, player.height, player.link, undefined, mdProps);
+			if (novoId) recriados++;
+		}
+		// save = false on purpose: saving the file inside the recreate makes the Excalidraw
+		// plugin treat it as an external change and rebuild the view, which kills the render.
+		if (!recriados) return recriados;
+		await ea.addElementsToView(false, false, false);
+
+		// Creating alone is not enough: a player has only ever rendered when creation came
+		// together with select + activeEmbeddable (what the insert path does). Walk the fresh
+		// players marking one active at a time, oldest first, so the newest ends up active.
+		const api = (typeof ea.getExcalidrawAPI === "function" ? ea.getExcalidrawAPI() : null) || null;
+		if (api && typeof api.updateScene === "function") {
+			const novos = achar().filter((item) => links.includes(item.link));
+			// The player the user clicked (this.preferidoLink) goes LAST, so it ends up active.
+			const preferido = this.preferidoLink ? novos.find((item) => item.link === this.preferidoLink) : null;
+			const fila = novos.slice().reverse().filter((item) => !preferido || item.link !== preferido.link);
+			if (preferido) fila.push(preferido);
+			this.preferidoLink = null;
+			for (const novo of fila) {
+				if (typeof api.selectElements === "function") api.selectElements([novo]);
+				await new Promise((resolve) => window.setTimeout(resolve, 400));
+				api.updateScene({
+					appState: { activeEmbeddable: { element: novo, state: "active" } },
+					captureUpdate: "NEVER",
+				});
+				await new Promise((resolve) => window.setTimeout(resolve, 400));
+			}
+		}
+		return recriados;
+	}
+
+	async recreatePlayers() {
+		const leaf = this.app.workspace.activeLeaf;
+		if (!leaf || !leaf.view || typeof leaf.view.getViewType !== "function") return 0;
+		if (leaf.view.getViewType() !== "excalidraw") return 0;
+		const automate = window.ExcalidrawAutomate;
+		if (!automate || typeof automate.getAPI !== "function") return 0;
+
+		let ea = null;
+		try {
+			ea = automate.getAPI(leaf.view);
+		} catch (error) {
+			return 0;
+		}
+		try {
+			const recriados = await this.recreatePlayersIn(ea);
+			if (recriados) await this.log(`recreated ${recriados} player(s) in the drawing`);
+			return recriados;
+		} catch (error) {
+			await this.logError("could not recreate the players: " + (error && error.message ? error.message : error));
+			return 0;
+		} finally {
+			if (ea && typeof ea.destroy === "function") ea.destroy();
+		}
+	}
+
+	// The Excalidraw plugin calls — and awaits — ea.onFileOpenHook right after loading a
+	// drawing: inside its own load cycle, before the canvas paints. That is the only window
+	// where a freshly created embeddable still mounts, so the players are recreated there.
+	installFileOpenHook() {
+		const automate = window.ExcalidrawAutomate;
+		if (!automate) return false;
+		if (automate.onFileOpenHook && automate.onFileOpenHook.__voicecomment) return true;
+
+		const anterior = automate.onFileOpenHook;
+		const hook = async (dados) => {
+			if (typeof anterior === "function") {
+				try {
+					await anterior(dados);
+				} catch (error) {
+					// a broken hook from someone else must not take ours down
+				}
+			}
+			try {
+				const recriados = await this.recreatePlayersIn(dados && dados.ea);
+				if (recriados) await this.log(`onFileOpenHook: recreated ${recriados} player(s) when the drawing opened`);
+			} catch (error) {
+				await this.logError("onFileOpenHook failed: " + (error && error.message ? error.message : error));
+			}
+		};
+		hook.__voicecomment = true;
+		automate.onFileOpenHook = hook;
+		return true;
+	}
+
+
+	// Turns the file name on for every player of the drawing. The flag lives inside
+	// the embeddable itself, so it survives saving and reopening — unlike extra
+	// elements placed next to the player, which Excalidraw drops.
+	async showPlayerFileNames() {
+		const leaf = this.app.workspace.activeLeaf;
+		if (!leaf || !leaf.view || typeof leaf.view.getViewType !== "function") return 0;
+		if (leaf.view.getViewType() !== "excalidraw") return 0;
+		const automate = window.ExcalidrawAutomate;
+		if (!automate || typeof automate.getAPI !== "function") return 0;
+
+		let ea = null;
+		try {
+			ea = automate.getAPI(leaf.view);
+		} catch (error) {
+			return 0;
+		}
+		if (!ea) return 0;
+
+		let changed = 0;
+		try {
+			const prefix = `${this.settings.prefix || DEFAULT_SETTINGS.prefix} `;
+			const players = (typeof ea.getViewElements === "function" ? ea.getViewElements() : [])
+				.filter((item) => item && item.type === "embeddable" && typeof item.link === "string"
+					&& /\.mp3\]\]$/i.test(item.link) && item.link.includes(prefix));
+			if (!players.length) return 0;
+
+			if (typeof ea.copyViewElementsToEAforEditing === "function") {
+				ea.copyViewElementsToEAforEditing(players);
+				for (const player of players) {
+					const element = typeof ea.getElement === "function" ? ea.getElement(player.id) : null;
+					if (!element) continue;
+					const mdProps = Object.assign({}, (element.customData && element.customData.mdProps) || {});
+					if (mdProps.filenameVisible && mdProps.useObsidianDefaults === false) continue;
+					mdProps.filenameVisible = true;
+					mdProps.useObsidianDefaults = false;
+					element.customData = Object.assign({}, element.customData || {}, { mdProps });
+					changed++;
+				}
+			}
+			if (changed) {
+				await ea.addElementsToView(false, false, false);
+				await this.log(`turned the file name on for ${changed} player(s) in the drawing`);
+			}
+			return changed;
+		} catch (error) {
+			await this.logError("could not turn the file name on: " + (error && error.message ? error.message : error));
+			return changed;
 		} finally {
 			if (typeof ea.destroy === "function") ea.destroy();
 		}
@@ -1183,7 +1504,23 @@ class VoiceCommentPlugin extends Plugin {
 			const x = center ? center.x - EMBED_WIDTH / 2 : 0;
 			const y = center ? center.y - height / 2 : 0;
 
-			const elementId = ea.addEmbeddable(x, y, EMBED_WIDTH, height, `[[${audioFile.path}]]`, undefined);
+			const playerLink = `[[${audioFile.path}]]`;
+			// The 7th argument of addEmbeddable is embeddableCustomData (mdProps); the
+			// 6th is a TFile. filenameVisible + useObsidianDefaults:false is what makes
+			// the player show the file name on the canvas, and the flag lives inside the
+			// element — so it survives saving and reopening.
+			const mdProps = {
+				useObsidianDefaults: false,
+				backgroundMatchCanvas: false,
+				backgroundMatchElement: true,
+				backgroundColor: "#fff",
+				backgroundOpacity: 60,
+				borderMatchElement: true,
+				borderColor: "#fff",
+				borderOpacity: 0,
+				filenameVisible: true,
+			};
+			const elementId = ea.addEmbeddable(x, y, EMBED_WIDTH, height, playerLink, undefined, mdProps);
 			const saved = await ea.addElementsToView(false, true, true);
 			if (saved === false) return false;
 

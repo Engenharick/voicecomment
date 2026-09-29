@@ -1,7 +1,7 @@
 {
   "id": "voicecomment",
   "name": "VoiceComment",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "minAppVersion": "1.4.0",
   "description": "Record voice notes as MP3 and drop the player exactly where you started: at the note cursor, or inside an Excalidraw drawing. The built-in recorder and the Excalidraw canvas joined in one element - one comment per idea, no ffmpeg, no cloud.",
   "author": "Engenharick",
