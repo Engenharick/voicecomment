@@ -1,9 +1,9 @@
-.voicecomment-panel {
+.ahembed-panel {
 	position: fixed;
 	right: 20px;
 	bottom: 44px;
 	z-index: var(--layer-status-bar);
-	width: 268px;
+	width: 262px;
 	padding: 12px 14px 14px;
 	border-radius: 10px;
 	border: 1px solid var(--background-modifier-border);
@@ -14,59 +14,38 @@
 	gap: 10px;
 }
 
-.voicecomment-panel.is-hidden {
+.ahembed-panel.is-hidden {
 	display: none;
 }
 
-.voicecomment-target {
-	display: flex;
-	flex-direction: column;
-	gap: 2px;
-}
-
-.voicecomment-target-label {
-	font-size: var(--font-ui-smaller);
-	color: var(--text-muted);
-	text-transform: uppercase;
-	letter-spacing: 0.04em;
-}
-
-.voicecomment-target-name {
+.ahembed-target {
 	font-size: var(--font-ui-small);
-	color: var(--text-normal);
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+	color: var(--text-muted);
 }
 
-.voicecomment-meter {
+.ahembed-meter {
 	width: 100%;
-	height: 44px;
+	height: 40px;
 	display: block;
 	border-radius: 6px;
 	background-color: var(--background-secondary);
 }
 
-.voicecomment-time {
+.ahembed-time {
 	font-variant-numeric: tabular-nums;
 	font-size: 26px;
 	text-align: center;
-	color: var(--text-normal);
 	line-height: 1;
 }
 
-.voicecomment-panel.is-paused .voicecomment-time {
-	color: var(--text-muted);
-}
-
-.voicecomment-controls {
+.ahembed-controls {
 	display: flex;
 	align-items: center;
 	justify-content: center;
 	gap: 8px;
 }
 
-.voicecomment-panel button.voicecomment-control {
+.ahembed-panel button.ahembed-control {
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -77,18 +56,7 @@
 	cursor: pointer;
 }
 
-.voicecomment-panel button.voicecomment-control.mod-record {
+.ahembed-panel button.ahembed-control.mod-record {
 	background-color: var(--interactive-accent);
 	color: var(--text-on-accent);
-}
-
-.voicecomment-statusbar.is-recording {
-	color: var(--text-error);
-}
-
-/* Offscreen probe: measures the height of the native audio player. */
-.voicecomment-probe {
-	position: fixed;
-	left: -10000px;
-	width: 500px;
 }

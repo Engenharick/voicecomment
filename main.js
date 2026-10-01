@@ -307,8 +307,8 @@ u.setModules(B,G,f,b,v,a,m,z,g);G.setModules(B,g,m,a);z.setModules(G,m);f.setMod
 a.length>D&&(D=a.length,p=0|1.25*D+7200,r=new Int8Array(p));a=u.lame_encode_buffer(q,a,b,a.length,r,0,p);return new Int8Array(r.subarray(0,a))};this.flush=function(){var a=u.lame_encode_flush(q,r,0,p);return new Int8Array(r.subarray(0,a))}};lamejs.WavHeader=Fa}lamejs();
 
 /*
- * VoiceComment — record a voice note and drop the MP3 player right where you
- * started recording: in a Markdown note, or inside an Excalidraw drawing.
+ * VoiceComment 2.0 — grava um áudio e plota no desenho um retângulo (embeddable)
+ * que mostra uma página HTML autossuficiente com o áudio dentro.
  *
  * Copyright (C) 2026 Engenharick
  *
@@ -319,50 +319,95 @@ a.length>D&&(D=a.length,p=0|1.25*D+7200,r=new Int8Array(p));a=u.lame_encode_buff
  * but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
  * or FITNESS FOR A PARTICULAR PURPOSE. See the LICENSE file for details.
  *
- * Bundles lamejs (LGPL-3.0) unmodified — see THIRD-PARTY-NOTICES.md.
+ * lamejs (LGPL-3.0) goes bundled, unmodified, inside the distributed main.js —
+ * see src/lamejs-LICENSE.txt. build.ps1 concatenates it with this file.
  *
- * This file is concatenated AFTER lame.min.js (which declares the `lamejs`
- * identifier in the module scope) to produce the distributed main.js.
- * See build.ps1.
- *
- * Audio is captured through two parallel paths:
- *   1) PCM via WebAudio -> lamejs   (single lossy step, best quality)
- *   2) MediaRecorder                (same path as Obsidian's built-in recorder;
- *      if WebAudio does not deliver samples, the compressed capture is decoded
- *      and re-encoded, so a recording is never lost)
+ * Como funciona:
+ *   1. o microfone é capturado por dois caminhos (PCM→lamejs, preferido, e
+ *      MediaRecorder como rede de segurança) e vira MP3;
+ *   2. o MP3 é gravado na pasta de gravações junto de uma página HTML
+ *      autossuficiente com o áudio em base64 (o áudio não precisa de outro
+ *      arquivo para tocar);
+ *   3. o plugin sobe um servidor local (127.0.0.1, só esta máquina) que serve
+ *      aquela pasta;
+ *   4. no desenho, um elemento "embeddable" aponta para
+ *      http://127.0.0.1:<porta>/<arquivo>.html — o Excalidraw renderiza links
+ *      como web view (um webview com autoplayPolicy=document-user-activation-
+ *      required, isto é: não toca sem clique) e o elemento fica salvo no
+ *      .excalidraw.md, então o retângulo volta quando o desenho é reaberto.
  */
 const obsidian = require("obsidian");
-const { Plugin, PluginSettingTab, Setting, Notice, MarkdownView, TFile, normalizePath, setIcon } = obsidian;
+const { Plugin, PluginSettingTab, Setting, Notice, TFile, normalizePath, setIcon } = obsidian;
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
 
 const DEFAULT_SETTINGS = {
 	folder: "VoiceComment",
-	prefix: "VoiceComment",
 	bitrate: 128,
-	insertPosition: "cursor",
+	port: 8781,
+	rectWidth: 470,
+	rectHeight: 200,
+	// Cores do retângulo plotado (o que o Excalidraw pinta atrás da página). A
+	// página não pinta fundo próprio, então a cor aparece. "transparent" (padrão)
+	// mantém o comportamento antigo: retângulo sem cor nenhuma.
+	rectStrokeColor: "transparent",
+	rectBackgroundColor: "transparent",
+	// Desenho do ícone na barra lateral (nome de ícone do Lucide). A cópia usa um
+	// desenho diferente para dar para distinguir os dois sem passar o mouse.
+	ribbonIconName: "mic",
 	showRibbonIcon: true,
 };
 
-// A zero-sample WAV: only used so an offscreen <audio controls> has a height.
-const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
-const EMBED_WIDTH = 500;
-const LOG_PATH = ".obsidian/plugins/voicecomment/voicecomment.log";
-const LOG_MAX_BYTES = 120000;
-const PCM_MIN_BYTES = 2000;
-const PCM_MIN_PEAK = 0.0005;
+const PAGE_MARKER = "<!-- AudioHtmlEmbed: página com áudio embutido -->";
+
+const MIME_BY_EXTENSION = {
+	".html": "text/html; charset=utf-8",
+	".mp3": "audio/mpeg",
+	".m4a": "audio/mp4",
+	".wav": "audio/wav",
+	".ogg": "audio/ogg",
+	".webm": "audio/webm",
+};
+
+// ---- utilidades ------------------------------------------------------------
 
 function formatDuration(ms) {
 	const total = Math.max(0, Math.floor(ms / 1000));
-	const minutes = Math.floor(total / 60);
-	const seconds = total % 60;
-	return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+	return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
 
-function timestamp() {
-	const momentApi = obsidian.moment || window.moment;
-	if (momentApi) return momentApi().format("YYYY-MM-DD HH.mm.ss");
+function stamp() {
 	const d = new Date();
 	const p = (n) => String(n).padStart(2, "0");
 	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}.${p(d.getMinutes())}.${p(d.getSeconds())}`;
+}
+
+function safeFileName(name) {
+	return String(name || "")
+		.replace(/[\\/:*?"<>|#^[\]]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim()
+		.replace(/^[.\s]+|[.\s]+$/g, "");
+}
+
+function escapeHtml(text) {
+	return String(text)
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
+}
+
+// btoa em fatias: uma chamada só, num arquivo longo, estoura a lista de argumentos.
+function bytesToBase64(bytes) {
+	let binary = "";
+	const slice = 0x8000;
+	for (let i = 0; i < bytes.length; i += slice) {
+		binary += String.fromCharCode.apply(null, bytes.subarray(i, i + slice));
+	}
+	return btoa(binary);
 }
 
 function joinChunks(chunks) {
@@ -391,7 +436,142 @@ function floatToPcm(input) {
 	return { pcm, peak };
 }
 
-class VoiceRecorder {
+// A página do retângulo: compacta (cabe no elemento), sem CDN, sem autoplay e com
+// player próprio — o botão do player nativo vive numa shadow root fechada e não
+// aceita ser aumentado por CSS.
+function buildRectanglePage(name, mime, base64, byteLength) {
+	const title = escapeHtml(name);
+	const dataUri = `data:${mime};base64,${base64}`;
+	const size = byteLength >= 1048576
+		? `${(byteLength / 1048576).toFixed(1)} MB`
+		: `${(byteLength / 1024).toFixed(1)} KB`;
+	return `<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>${title}</title>
+${PAGE_MARKER}
+<style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; display: flex; align-items: center; justify-content: center;
+	font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+	background: transparent; color: #fff; }
+.card { width: 100%; padding: 12px 16px; }
+/* Texto claro com sombra escura: legível sobre qualquer cor de fundo que o
+   retângulo receba (a página não pinta fundo próprio). */
+h1 { margin: 0 0 8px; font-size: 12px; font-weight: 600; text-align: center;
+	word-break: break-word; text-shadow: 0 1px 3px rgba(0,0,0,.65), 0 0 8px rgba(0,0,0,.4); }
+.player { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.play {
+	width: 84px; height: 84px; padding: 0; border: 0; border-radius: 50%;
+	background: #4b4bd6; color: #fff; cursor: pointer; display: grid; place-items: center;
+	box-shadow: 0 4px 14px rgba(0,0,0,.35), 0 0 0 2px rgba(255,255,255,.4);
+	transition: transform .08s ease, background .15s ease;
+}
+.play:hover { background: #3f3fc0; transform: scale(1.04); }
+.play:active { transform: scale(.97); }
+.play:focus-visible { outline: 3px solid #a5a5ff; outline-offset: 3px; }
+.play svg { width: 42px; height: 42px; fill: currentColor; display: block; }
+.play .icon-pause { display: none; }
+.play.playing .icon-play { display: none; }
+.play.playing .icon-pause { display: block; }
+/* Barra com trilho escuro e preenchimento branco: aparece tanto em fundo claro
+   quanto escuro. */
+.bar { width: 100%; height: 8px; border-radius: 5px; background: rgba(0,0,0,.35);
+	border: 1px solid rgba(255,255,255,.35); cursor: pointer; overflow: hidden; }
+.fill { height: 100%; width: 0; background: #fff; border-radius: 5px; }
+.time { font-size: 11px; font-variant-numeric: tabular-nums;
+	text-shadow: 0 1px 3px rgba(0,0,0,.65), 0 0 8px rgba(0,0,0,.4); }
+.row { margin-top: 8px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+/* O link vira uma "pastilha" escura translúcida, para não sumir em fundo escuro. */
+a { font-size: 11px; color: #fff; text-decoration: none; padding: 3px 8px; border-radius: 6px;
+	background: rgba(0,0,0,.38); }
+a:hover { background: rgba(0,0,0,.55); }
+.meta { font-size: 11px; text-shadow: 0 1px 3px rgba(0,0,0,.65), 0 0 8px rgba(0,0,0,.4); }
+audio { display: none; }
+@media (prefers-color-scheme: dark) {
+	.play { background: #6d6de8; }
+	.play:hover { background: #7f7ff0; }
+}
+</style>
+</head>
+<body>
+<div class="card">
+	<h1>${title}</h1>
+	<div class="player">
+		<button id="toggle" class="play" type="button" aria-label="Tocar" title="Tocar / pausar">
+			<svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+			<svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+		</button>
+		<div class="bar" id="bar" title="Avançar"><div class="fill" id="fill"></div></div>
+		<div class="time"><span id="now">0:00</span> / <span id="total">0:00</span></div>
+	</div>
+	<div class="row">
+		<a id="download" download="${title}" href="#">baixar o mp3</a>
+		<span class="meta">${size}</span>
+	</div>
+	<audio id="player" preload="metadata" src="${dataUri}"></audio>
+</div>
+<script>
+var player = document.getElementById("player");
+var toggle = document.getElementById("toggle");
+var fill = document.getElementById("fill");
+var bar = document.getElementById("bar");
+var now = document.getElementById("now");
+var total = document.getElementById("total");
+var download = document.getElementById("download");
+
+function fmt(segundos) {
+	if (!isFinite(segundos)) return "0:00";
+	var m = Math.floor(segundos / 60);
+	var s = Math.floor(segundos % 60);
+	return m + ":" + (s < 10 ? "0" + s : s);
+}
+
+toggle.addEventListener("click", function () {
+	// Nunca há autoplay: o som só começa por este clique.
+	if (player.paused) player.play(); else player.pause();
+});
+player.addEventListener("play", function () {
+	toggle.classList.add("playing");
+	toggle.setAttribute("aria-label", "Pausar");
+});
+player.addEventListener("pause", function () {
+	toggle.classList.remove("playing");
+	toggle.setAttribute("aria-label", "Tocar");
+});
+player.addEventListener("ended", function () {
+	toggle.classList.remove("playing");
+	fill.style.width = "0%";
+	now.textContent = "0:00";
+});
+player.addEventListener("loadedmetadata", function () { total.textContent = fmt(player.duration); });
+player.addEventListener("timeupdate", function () {
+	if (player.duration) fill.style.width = (player.currentTime / player.duration) * 100 + "%";
+	now.textContent = fmt(player.currentTime);
+});
+bar.addEventListener("click", function (evento) {
+	if (!player.duration) return;
+	var area = bar.getBoundingClientRect();
+	var fracao = Math.min(1, Math.max(0, (evento.clientX - area.left) / area.width));
+	player.currentTime = fracao * player.duration;
+});
+// O botão de baixar usa a mesma fonte do player: o áudio aparece uma vez só.
+if (player.src) download.href = player.src;
+</script>
+</body>
+</html>
+`;
+}
+
+// ---- gravador --------------------------------------------------------------
+
+const MIN_BYTES = 2000;
+const MIN_PEAK = 0.0005;
+
+class Recorder {
 	constructor(logger) {
 		this.log = logger || (() => {});
 		this.reset();
@@ -410,12 +590,9 @@ class VoiceRecorder {
 		this.mediaRecorder = null;
 		this.mediaChunks = [];
 		this.mimeType = "";
-		this.bitrate = DEFAULT_SETTINGS.bitrate;
+		this.bitrate = 128;
 		this.pcmPeak = 0;
-		this.paused = false;
 		this.startedAt = 0;
-		this.pausedAt = 0;
-		this.pausedTotal = 0;
 	}
 
 	get active() {
@@ -423,27 +600,23 @@ class VoiceRecorder {
 	}
 
 	elapsedMs() {
-		if (!this.startedAt) return 0;
-		const reference = this.paused ? this.pausedAt : performance.now();
-		return Math.max(0, reference - this.startedAt - this.pausedTotal);
+		return this.startedAt ? Math.max(0, performance.now() - this.startedAt) : 0;
 	}
 
 	pickMimeType() {
 		if (typeof MediaRecorder === "undefined") return "";
-		const candidates = ["audio/mp4", 'audio/webm;codecs="opus"', "audio/webm", "audio/ogg"];
-		for (const candidate of candidates) {
+		for (const candidate of ["audio/mp4", 'audio/webm;codecs="opus"', "audio/webm", "audio/ogg"]) {
 			if (MediaRecorder.isTypeSupported(candidate)) return candidate;
 		}
 		return "";
 	}
 
 	async start(bitrate) {
-		this.bitrate = bitrate;
+		this.bitrate = bitrate || 128;
 		this.stream = await navigator.mediaDevices.getUserMedia({
 			audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
 		});
 
-		// Path 2 (safety net): MediaRecorder, the same capture the built-in recorder uses.
 		this.mimeType = this.pickMimeType();
 		this.mediaChunks = [];
 		try {
@@ -454,10 +627,9 @@ class VoiceRecorder {
 			this.mediaRecorder.start(1000);
 		} catch (error) {
 			this.mediaRecorder = null;
-			this.log("MediaRecorder unavailable: " + (error && error.message ? error.message : error));
+			this.log("MediaRecorder indisponível: " + (error && error.message ? error.message : error));
 		}
 
-		// Path 1 (preferred): raw PCM straight into lamejs.
 		let ctx;
 		try {
 			ctx = new AudioContext({ sampleRate: 44100 });
@@ -465,16 +637,16 @@ class VoiceRecorder {
 			ctx = new AudioContext();
 		}
 		this.ctx = ctx;
-		// A context created without user activation starts suspended: the graph
-		// never runs and onaudioprocess never fires. Resuming is not optional.
+		// Contexto criado sem ativação do usuário nasce suspenso: sem retomar, o
+		// grafo não roda e onaudioprocess nunca dispara (e o cronômetro engana).
 		if (ctx.state === "suspended") {
 			try {
 				await ctx.resume();
 			} catch (error) {
-				this.log("ctx.resume() failed: " + (error && error.message ? error.message : error));
+				this.log("ctx.resume() falhou: " + (error && error.message ? error.message : error));
 			}
 		}
-		this.log(`capture: AudioContext=${ctx.state} sampleRate=${ctx.sampleRate}Hz mime=${this.mimeType || "(default)"} kbps=${bitrate}`);
+		this.log(`captura: AudioContext=${ctx.state} taxa=${ctx.sampleRate}Hz mime=${this.mimeType || "(padrão)"} kbps=${this.bitrate}`);
 
 		this.source = ctx.createMediaStreamSource(this.stream);
 		this.analyser = ctx.createAnalyser();
@@ -482,22 +654,19 @@ class VoiceRecorder {
 		this.spectrum = new Float32Array(this.analyser.fftSize);
 		this.source.connect(this.analyser);
 
-		// ScriptProcessor remains the most portable option in Obsidian's Chromium.
 		this.processor = ctx.createScriptProcessor(4096, 1, 1);
 		this.analyser.connect(this.processor);
-		// It only fires when the chain reaches the destination; a zero gain node
-		// avoids feedback through the speakers.
 		this.sink = ctx.createGain();
 		this.sink.gain.value = 0;
 		this.processor.connect(this.sink);
 		this.sink.connect(ctx.destination);
 
-		this.encoder = new lamejs.Mp3Encoder(1, ctx.sampleRate, bitrate);
+		this.encoder = new lamejs.Mp3Encoder(1, ctx.sampleRate, this.bitrate);
 		this.chunks = [];
 		this.pcmPeak = 0;
 
 		this.processor.onaudioprocess = (event) => {
-			if (this.paused || !this.encoder) return;
+			if (!this.encoder) return;
 			const { pcm, peak } = floatToPcm(event.inputBuffer.getChannelData(0));
 			if (peak > this.pcmPeak) this.pcmPeak = peak;
 			const encoded = this.encoder.encodeBuffer(pcm);
@@ -505,9 +674,6 @@ class VoiceRecorder {
 		};
 
 		this.startedAt = performance.now();
-		this.pausedAt = 0;
-		this.pausedTotal = 0;
-		this.paused = false;
 	}
 
 	readLevel() {
@@ -516,25 +682,6 @@ class VoiceRecorder {
 		let sum = 0;
 		for (let i = 0; i < this.spectrum.length; i++) sum += this.spectrum[i] * this.spectrum[i];
 		return Math.min(1, Math.sqrt(sum / this.spectrum.length) * 4);
-	}
-
-	pause() {
-		if (this.paused) return;
-		if (this.mediaRecorder && this.mediaRecorder.state === "recording") {
-			try { this.mediaRecorder.pause(); } catch (error) { /* noop */ }
-		}
-		this.paused = true;
-		this.pausedAt = performance.now();
-	}
-
-	resume() {
-		if (!this.paused) return;
-		if (this.mediaRecorder && this.mediaRecorder.state === "paused") {
-			try { this.mediaRecorder.resume(); } catch (error) { /* noop */ }
-		}
-		this.pausedTotal += performance.now() - this.pausedAt;
-		this.pausedAt = 0;
-		this.paused = false;
 	}
 
 	async stop() {
@@ -549,41 +696,35 @@ class VoiceRecorder {
 				if (tail.length > 0) this.chunks.push(new Uint8Array(tail));
 				pcm = joinChunks(this.chunks);
 			} catch (error) {
-				this.log("PCM flush failed: " + (error && error.message ? error.message : error));
+				this.log("flush do PCM falhou: " + (error && error.message ? error.message : error));
 			}
 		}
 
 		const blob = await this.stopMediaRecorder();
 		const pcmBytes = pcm ? pcm.byteLength : 0;
-		const mediaBytes = blob ? blob.size : 0;
 		const peak = this.pcmPeak;
 		this.teardown();
-		this.log(`stop: ${Math.round(durationMs)}ms pcm=${pcmBytes}B peak=${peak.toFixed(4)} media=${mediaBytes}B`);
+		this.log(`stop: ${Math.round(durationMs)}ms pcm=${pcmBytes}B pico=${peak.toFixed(4)} media=${blob ? blob.size : 0}B`);
 
-		if (pcmBytes > PCM_MIN_BYTES && peak > PCM_MIN_PEAK) {
-			return { data: pcm, durationMs, source: "pcm" };
-		}
+		if (pcmBytes > MIN_BYTES && peak > MIN_PEAK) return { data: pcm, durationMs, source: "pcm" };
 		if (blob) {
 			try {
 				const converted = await this.encodeBlob(blob, bitrate);
-				this.log(`converted from MediaRecorder: ${converted.byteLength}B`);
-				if (converted.byteLength > PCM_MIN_BYTES) return { data: converted, durationMs, source: "media" };
+				if (converted.byteLength > MIN_BYTES) return { data: converted, durationMs, source: "media" };
 			} catch (error) {
-				this.log("MediaRecorder conversion failed: " + (error && error.message ? error.message : error));
+				this.log("conversão do MediaRecorder falhou: " + (error && error.message ? error.message : error));
 			}
 		}
-		if (pcmBytes > 0) return { data: pcm, durationMs, source: "pcm-silent" };
+		if (pcmBytes > 0) return { data: pcm, durationMs, source: "pcm-silencioso" };
 		return null;
 	}
 
-	// Decodes the MediaRecorder capture and re-encodes it as MP3. Used when the
-	// PCM path produced no audio (e.g. a suspended AudioContext).
 	async encodeBlob(blob, bitrate) {
 		const arrayBuffer = await blob.arrayBuffer();
 		const decodeCtx = new OfflineAudioContext(1, 1, 44100);
 		const audioBuffer = await decodeCtx.decodeAudioData(arrayBuffer);
 		const samples = audioBuffer.getChannelData(0);
-		const encoder = new lamejs.Mp3Encoder(1, audioBuffer.sampleRate, bitrate || DEFAULT_SETTINGS.bitrate);
+		const encoder = new lamejs.Mp3Encoder(1, audioBuffer.sampleRate, bitrate || 128);
 		const chunks = [];
 		const blockSize = 1152 * 16;
 		for (let i = 0; i < samples.length; i += blockSize) {
@@ -637,31 +778,25 @@ class VoiceRecorder {
 	}
 }
 
+// ---- painel de gravação ----------------------------------------------------
+
 class RecorderPanel {
 	constructor(handlers) {
 		this.handlers = handlers;
 		this.levels = [];
-
-		this.el = document.body.createDiv({ cls: "voicecomment-panel is-hidden" });
-
-		const target = this.el.createDiv({ cls: "voicecomment-target" });
-		target.createSpan({ cls: "voicecomment-target-label", text: "Recording into" });
-		this.targetName = target.createSpan({ cls: "voicecomment-target-name", text: "" });
-
-		this.canvas = this.el.createEl("canvas", { cls: "voicecomment-meter", attr: { width: 240, height: 44 } });
+		this.el = document.body.createDiv({ cls: "ahembed-panel is-hidden" });
+		this.targetName = this.el.createDiv({ cls: "ahembed-target", text: "Gravando…" });
+		this.canvas = this.el.createEl("canvas", { cls: "ahembed-meter", attr: { width: 240, height: 40 } });
 		this.meter = this.canvas.getContext("2d");
-
-		this.timeEl = this.el.createDiv({ cls: "voicecomment-time", text: "00:00" });
-
-		const controls = this.el.createDiv({ cls: "voicecomment-controls" });
-		this.pauseBtn = this.button(controls, "pause", "Pause", () => this.handlers.onPauseToggle());
-		this.stopBtn = this.button(controls, "square", "Stop and save", () => this.handlers.onStop());
+		this.timeEl = this.el.createDiv({ cls: "ahembed-time", text: "00:00" });
+		const controls = this.el.createDiv({ cls: "ahembed-controls" });
+		this.stopBtn = this.button(controls, "square", "Parar e plotar", () => this.handlers.onStop());
 		this.stopBtn.addClass("mod-record");
-		this.discardBtn = this.button(controls, "trash-2", "Discard recording", () => this.handlers.onDiscard());
+		this.discardBtn = this.button(controls, "trash-2", "Descartar", () => this.handlers.onDiscard());
 	}
 
 	button(parent, icon, label, onClick) {
-		const el = parent.createEl("button", { cls: "voicecomment-control" });
+		const el = parent.createEl("button", { cls: "ahembed-control" });
 		setIcon(el, icon);
 		el.setAttribute("aria-label", label);
 		el.addEventListener("click", onClick);
@@ -673,9 +808,7 @@ class RecorderPanel {
 		this.levels = [];
 		this.timeEl.setText("00:00");
 		this.el.removeClass("is-hidden");
-		this.el.removeClass("is-paused");
-		setIcon(this.pauseBtn, "pause");
-		this.renderMeter();
+		this.render();
 	}
 
 	hide() {
@@ -686,36 +819,23 @@ class RecorderPanel {
 		this.timeEl.setText(formatDuration(ms));
 	}
 
-	setPaused(paused) {
-		this.el.toggleClass("is-paused", paused);
-		setIcon(this.pauseBtn, paused ? "play" : "pause");
-	}
-
 	pushLevel(level) {
 		this.levels.push(level);
 		if (this.levels.length > 64) this.levels.splice(0, this.levels.length - 64);
-		this.renderMeter();
+		this.render();
 	}
 
-	renderMeter() {
-		const canvas = this.canvas;
+	render() {
 		const ctx = this.meter;
 		const style = getComputedStyle(document.body);
-		const background = style.getPropertyValue("--background-secondary") || "#222";
-		const accent = style.getPropertyValue("--interactive-accent") || "#888";
-
-		ctx.fillStyle = background;
-		ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-		const barWidth = 4;
-		const gap = 2;
-		const capacity = Math.floor(canvas.width / (barWidth + gap));
+		ctx.fillStyle = style.getPropertyValue("--background-secondary") || "#222";
+		ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+		const capacity = Math.floor(this.canvas.width / 6);
 		const levels = this.levels.slice(-capacity);
 		levels.forEach((level, index) => {
-			const height = Math.max(3, level * (canvas.height - 8));
-			const x = canvas.width - (levels.length - index) * (barWidth + gap);
-			ctx.fillStyle = accent;
-			ctx.fillRect(x, (canvas.height - height) / 2, barWidth, height);
+			const height = Math.max(3, level * (this.canvas.height - 8));
+			ctx.fillStyle = style.getPropertyValue("--interactive-accent") || "#888";
+			ctx.fillRect(index * 6, (this.canvas.height - height) / 2, 4, height);
 		});
 	}
 
@@ -724,277 +844,125 @@ class RecorderPanel {
 	}
 }
 
-class VoiceCommentSettingTab extends PluginSettingTab {
-	constructor(app, plugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
+// ---- o plugin --------------------------------------------------------------
 
-	display() {
-		const { containerEl } = this;
-		containerEl.empty();
-
-		new Setting(containerEl).setName("File").setHeading();
-
-		new Setting(containerEl)
-			.setName("Recordings folder")
-			.setDesc("Created automatically if it doesn't exist.")
-			.addText((text) => text
-				.setPlaceholder("VoiceComment")
-				.setValue(this.plugin.settings.folder)
-				.onChange(async (value) => {
-					this.plugin.settings.folder = value.trim() || DEFAULT_SETTINGS.folder;
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
-			.setName("File name prefix")
-			.setDesc("The date and time are appended to it, for example: VoiceComment 2026-09-25 18.20.33.mp3")
-			.addText((text) => text
-				.setPlaceholder("VoiceComment")
-				.setValue(this.plugin.settings.prefix)
-				.onChange(async (value) => {
-					this.plugin.settings.prefix = value.trim() || DEFAULT_SETTINGS.prefix;
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
-			.setName("MP3 quality")
-			.setDesc("Mono. 128 kb/s is plenty for voice.")
-			.addDropdown((dropdown) => dropdown
-				.addOptions({ "64": "64 kb/s", "96": "96 kb/s", "128": "128 kb/s", "192": "192 kb/s" })
-				.setValue(String(this.plugin.settings.bitrate))
-				.onChange(async (value) => {
-					this.plugin.settings.bitrate = Number(value);
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl).setName("Insertion").setHeading();
-
-		new Setting(containerEl)
-			.setName("Insert the recording")
-			.setDesc("At the cursor when the note is in edit mode; at the end of the note otherwise.")
-			.addDropdown((dropdown) => dropdown
-				.addOption("cursor", "At the cursor position")
-				.addOption("end", "At the end of the note")
-				.setValue(this.plugin.settings.insertPosition)
-				.onChange(async (value) => {
-					this.plugin.settings.insertPosition = value;
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl).setName("Interface").setHeading();
-
-		new Setting(containerEl)
-			.setName("Microphone icon in the sidebar")
-			.addToggle((toggle) => toggle
-				.setValue(this.plugin.settings.showRibbonIcon)
-				.onChange(async (value) => {
-					this.plugin.settings.showRibbonIcon = value;
-					await this.plugin.saveSettings();
-					this.plugin.refreshRibbonIcon();
-				}));
-
-		new Setting(containerEl)
-			.setName("Diagnostic log")
-			.setDesc(LOG_PATH)
-			.addButton((button) => button
-				.setButtonText("Open")
-				.onClick(() => this.plugin.openLog()));
-	}
-}
-
-class VoiceCommentPlugin extends Plugin {
+class AudioHtmlEmbedPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
-
-		this.recorder = new VoiceRecorder((message) => this.log(message));
+		this.recorder = new Recorder((message) => this.log(message));
 		this.panel = new RecorderPanel({
-			onPauseToggle: () => this.togglePause(),
-			onStop: () => this.stopRecording(true),
-			onDiscard: () => this.stopRecording(false),
+			onStop: () => this.stopAndPlot(),
+			onDiscard: () => this.discardRecording(),
 		});
-		this.targetFile = null;
 		this.ribbonIcon = null;
+		this.server = null;
+		this.effectivePort = null;
 
 		this.statusBar = this.addStatusBarItem();
-		this.statusBar.addClass("voicecomment-statusbar");
-
-		this.addSettingTab(new VoiceCommentSettingTab(this.app, this));
+		this.addSettingTab(new AudioHtmlEmbedSettingTab(this.app, this));
 		this.refreshRibbonIcon();
+		this.addCommands();
+		this.registerInterval(window.setInterval(() => this.tick(), 60));
 
+		this.startServer();
+		this.log(`plugin carregado — pasta "${this.folderPath()}"`);
+	}
+
+	async onunload() {
+		this.stopServer();
+		if (this.recorder) this.recorder.discard();
+		if (this.panel) this.panel.destroy();
+		if (this.statusBar) this.statusBar.setText("");
+	}
+
+	addCommands() {
 		this.addCommand({
-			id: "start-stop-recording",
-			name: "Start/stop recording",
+			id: "record-and-plot",
+			name: "Gravar áudio e plotar no desenho",
 			callback: () => this.toggleRecording(),
 		});
 		this.addCommand({
-			id: "start-recording",
-			name: "Start recording",
+			id: "restart-server",
+			name: "Reiniciar o servidor local das páginas",
+			callback: () => {
+				this.stopServer();
+				this.startServer();
+			},
+		});
+		this.addCommand({
+			id: "insert-page-here",
+			name: "Plotar no desenho a última página gravada",
 			checkCallback: (checking) => {
-				if (this.recorder.active) return false;
-				if (!checking) this.startRecording();
+				if (!this.lastPage) return false;
+				if (!checking) this.plotPage(this.lastPage);
 				return true;
 			},
 		});
 		this.addCommand({
-			id: "pause-resume-recording",
-			name: "Pause/resume recording",
-			checkCallback: (checking) => {
-				if (!this.recorder.active) return false;
-				if (!checking) this.togglePause();
-				return true;
-			},
+			id: "rebuild-pages",
+			name: "Refazer as páginas das gravações (player novo)",
+			callback: () => this.rebuildPages(),
 		});
-		this.addCommand({
-			id: "stop-save-recording",
-			name: "Stop and save recording",
-			checkCallback: (checking) => {
-				if (!this.recorder.active) return false;
-				if (!checking) this.stopRecording(true);
-				return true;
-			},
-		});
-		this.addCommand({
-			id: "discard-recording",
-			name: "Discard recording",
-			checkCallback: (checking) => {
-				if (!this.recorder.active) return false;
-				if (!checking) this.stopRecording(false);
-				return true;
-			},
-		});
-		this.addCommand({
-			id: "activate-latest-player",
-			name: "Activate the latest player in the drawing",
-			checkCallback: (checking) => {
-				const leaf = this.app.workspace.activeLeaf;
-				const inDrawing = !!(leaf && leaf.view && typeof leaf.view.getViewType === "function"
-					&& leaf.view.getViewType() === "excalidraw");
-				if (!inDrawing) return false;
-				if (!checking) this.activateLatestPlayer();
-				return true;
-			},
-		});
-		this.addCommand({
-			id: "show-player-filenames",
-			name: "Show the file name on every player in the drawing",
-			checkCallback: (checking) => {
-				const leaf = this.app.workspace.activeLeaf;
-				const inDrawing = !!(leaf && leaf.view && typeof leaf.view.getViewType === "function"
-					&& leaf.view.getViewType() === "excalidraw");
-				if (!inDrawing) return false;
-				if (!checking) this.showPlayerFileNames();
-				return true;
-			},
-		});
-		this.addCommand({
-			id: "open-recordings-window",
-			name: "Open this drawing's recordings in a floating window",
-			checkCallback: (checking) => {
-				if (!this.app.workspace.getActiveFile()) return false;
-				if (!checking) this.openRecordingsWindow();
-				return true;
-			},
-		});
-		this.addCommand({
-			id: "recreate-players",
-			name: "Recreate the players in the drawing (re-render)",
-			checkCallback: (checking) => {
-				const leaf = this.app.workspace.activeLeaf;
-				const inDrawing = !!(leaf && leaf.view && typeof leaf.view.getViewType === "function"
-					&& leaf.view.getViewType() === "excalidraw");
-				if (!inDrawing) return false;
-				if (!checking) this.recreatePlayers();
-				return true;
-			},
-		});
-
-		// Clicking a player needs no code: Excalidraw's own behaviour opens the linked mp3, so a
-		// click plays that recording. Reloading the view here only blinked the screen and fought
-		// the user's choice, so there is no pointer handler any more.
-
-		// Excalidraw renders an embeddable only while it is the active one, and that
-		// state is not restored when a drawing is reopened — the player falls back to
-		// a placeholder until it is clicked. Re-activate the newest player whenever a
-		// drawing becomes the active view.
-		this.playerTimer = null;
-		// file-open fires before the drawing view renders its scene, so acting there with no
-		// delay is the earliest chance to mark a player active *before* Excalidraw builds the
-		// embeddables — the later the marker lands, the less likely it is to be honored.
-		this.registerEvent(this.app.workspace.on("file-open", () => this.schedulePlayerActivation(0)));
-		this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.schedulePlayerActivation(0)));
-		this.registerEvent(this.app.workspace.on("layout-change", () => this.schedulePlayerActivation()));
-		this.schedulePlayerActivation(0);
-
-		// The global ExcalidrawAutomate may not exist yet when this plugin loads (load order),
-		// so keep trying for a minute: until the hook is installed, a drawing that opens later
-		// cannot have its players recreated inside the Excalidraw load cycle.
-		this.hookTimer = null;
-		if (!this.installFileOpenHook()) {
-			let tentativas = 0;
-			this.hookTimer = window.setInterval(() => {
-				if (this.installFileOpenHook() || ++tentativas > 30) {
-					window.clearInterval(this.hookTimer);
-					this.hookTimer = null;
-				}
-			}, 2000);
-		}
-
-		this.registerInterval(window.setInterval(() => this.tick(), 60));
-		this.log("plugin loaded");
 	}
 
-	onunload() {
-		if (this.playerTimer) window.clearTimeout(this.playerTimer);
-		this.playerTimer = null;
-		if (this.playerRetry) window.clearTimeout(this.playerRetry);
-		this.playerRetry = null;
-		if (this.hookTimer) window.clearInterval(this.hookTimer);
-		this.hookTimer = null;
-		this.recorder.discard();
-		this.panel.destroy();
-		this.statusBar.setText("");
+	// Reescreve a página de cada MP3 da pasta, para gravações antigas passarem a
+	// usar o player novo. Só mexe em página que o plugin escreveu (tem o marcador).
+	async rebuildPages() {
+		const folder = this.folderPath();
+		const mp3s = this.app.vault.getFiles()
+			.filter((file) => file.path.startsWith(`${folder}/`) && /\.mp3$/i.test(file.name));
+		if (!mp3s.length) {
+			this.aviso(`AudioHtmlEmbed: nenhum MP3 em "${folder}".`);
+			return;
+		}
+		let feitas = 0;
+		let falhas = 0;
+		for (const mp3 of mp3s) {
+			try {
+				const bytes = new Uint8Array(await this.app.vault.readBinary(mp3));
+				const page = buildRectanglePage(mp3.name, "audio/mpeg", bytesToBase64(bytes), bytes.length);
+				const caminho = normalizePath(mp3.path.replace(/\.mp3$/i, ".html"));
+				const existente = this.app.vault.getAbstractFileByPath(caminho);
+				if (existente instanceof TFile) {
+					const atual = await this.app.vault.read(existente);
+					if (!atual.includes(PAGE_MARKER)) {
+						falhas++;
+						this.log(`refazer páginas: ${caminho} não é página do plugin, deixei como está`);
+						continue;
+					}
+					await this.app.vault.modify(existente, page);
+				} else {
+					await this.app.vault.create(caminho, page);
+				}
+				feitas++;
+			} catch (error) {
+				falhas++;
+				this.log("refazer páginas falhou em " + mp3.path + ": " + (error && error.message ? error.message : error));
+			}
+		}
+		this.log(`refazer páginas: ${feitas} refeita(s), ${falhas} falha(s)`);
+		this.aviso(`AudioHtmlEmbed: ${feitas} página(s) refeita(s) com o player novo${falhas ? `, ${falhas} sem mexer` : ""}.`);
+	}
+
+	// O log fica na pasta do próprio plugin — assim a cópia de teste tem o dela,
+	// sem escrever no log da principal.
+	logPath() {
+		return `.obsidian/plugins/${this.manifest.id}/voicecomment.log`;
 	}
 
 	async log(message) {
-		await this.appendLog(`[${timestamp()}] ${message}`);
-	}
-
-	// Only real failures reach the developer console; routine entries stay in the file.
-	async logError(message, error) {
-		const detail = error && error.stack ? error.stack : error;
-		console.error(`VoiceComment: ${message}`, detail === undefined ? "" : detail);
-		await this.appendLog(`[${timestamp()}] ${message} ${detail === undefined ? "" : detail}`);
-	}
-
-	async appendLog(line) {
 		try {
 			const adapter = this.app.vault.adapter;
+			const caminho = this.logPath();
 			let info = null;
 			try {
-				info = await adapter.stat(LOG_PATH);
+				info = await adapter.stat(caminho);
 			} catch (error) {
 				info = null;
 			}
-			if (info && info.size > LOG_MAX_BYTES) await adapter.write(LOG_PATH, "");
-			await adapter.append(LOG_PATH, `${line}\n`);
-		} catch (error) { /* the log must never get in the way of the plugin */ }
-	}
-
-	async openLog() {
-		try {
-			const adapter = this.app.vault.adapter;
-			if (!(await adapter.exists(LOG_PATH))) {
-				new Notice("VoiceComment: no log yet.");
-				return;
-			}
-			// The vault index does not see .obsidian, so the file is opened through
-			// the OS instead of the workspace.
-			require("electron").shell.openPath(adapter.getFullPath(LOG_PATH));
-		} catch (error) {
-			new Notice(`VoiceComment: log at ${LOG_PATH}`);
-		}
+			if (info && info.size > 120000) await adapter.write(caminho, "");
+			await adapter.append(caminho, `[${stamp()}] ${message}\n`);
+		} catch (error) { /* o log nunca pode atrapalhar */ }
 	}
 
 	async loadSettings() {
@@ -1006,105 +974,190 @@ class VoiceCommentPlugin extends Plugin {
 	}
 
 	refreshRibbonIcon() {
+		const titulo = `${this.nome()}: gravar áudio e plotar no desenho`;
+		const desenho = this.settings.ribbonIconName || "mic";
+		// Um ícone pode ter sobrado de uma instância anterior (ou de uma versão com
+		// outro nome): se o rótulo não bate, ele é refeito em vez de reaproveitado.
+		if (this.ribbonIcon && this.ribbonIcon.getAttribute("aria-label") !== titulo) {
+			this.ribbonIcon.remove();
+			this.ribbonIcon = null;
+		}
 		if (this.settings.showRibbonIcon && !this.ribbonIcon) {
-			this.ribbonIcon = this.addRibbonIcon("mic", "VoiceComment: start/stop recording", () => this.toggleRecording());
+			this.ribbonIcon = this.addRibbonIcon(desenho, titulo, () => this.toggleRecording());
 		} else if (!this.settings.showRibbonIcon && this.ribbonIcon) {
 			this.ribbonIcon.remove();
 			this.ribbonIcon = null;
 		}
 	}
 
+	folderPath() {
+		return normalizePath(this.settings.folder || DEFAULT_SETTINGS.folder).replace(/\/+$/, "");
+	}
+
+	// O nome sai do manifest: a principal e a cópia aparecem com nomes distintos no
+	// ícone da barra lateral e nas mensagens.
+	nome() {
+		return (this.manifest && this.manifest.name) || "Voice_Comment_2.0";
+	}
+
+	aviso(texto) {
+		new Notice(String(texto).replace(/^AudioHtmlEmbed\b/, this.nome()));
+	}
+
+	serviceBase() {
+		return `http://127.0.0.1:${this.effectivePort || this.settings.port}`;
+	}
+
 	tick() {
 		if (!this.recorder.active) return;
 		const elapsed = this.recorder.elapsedMs();
 		this.panel.setTime(elapsed);
-		this.statusBar.setText(`${this.recorder.paused ? "⏸" : "🔴"} ${formatDuration(elapsed)}`);
-		if (!this.recorder.paused) this.panel.pushLevel(this.recorder.readLevel());
+		this.statusBar.setText(`🔴 ${formatDuration(elapsed)}`);
+		this.panel.pushLevel(this.recorder.readLevel());
 	}
 
-	getTargetNote() {
-		const file = this.app.workspace.getActiveFile();
-		if (file && file.extension === "md") return file;
-		return null;
+	targetDrawingView() {
+		const leaf = this.app.workspace.activeLeaf;
+		if (!leaf || !leaf.view || typeof leaf.view.getViewType !== "function") return null;
+		return leaf.view.getViewType() === "excalidraw" ? leaf.view : null;
 	}
+
+	/* ---- servidor local ---------------------------------------------------- */
+
+	startServer() {
+		const folder = this.folderPath();
+		this.server = http.createServer((request, response) => {
+			try {
+				const url = decodeURIComponent((request.url || "/").split("?")[0]);
+				const name = path.basename(url);
+				const extension = path.extname(name).toLowerCase();
+				const full = path.join(this.app.vault.adapter.getBasePath(), folder, name);
+				const inside = path.resolve(full).startsWith(path.resolve(this.app.vault.adapter.getBasePath(), folder));
+				if (request.method !== "GET" && request.method !== "HEAD") {
+					response.writeHead(405).end("method not allowed");
+					this.log(`servidor: ${request.method} ${url} -> 405`);
+					return;
+				}
+				if (!inside || !MIME_BY_EXTENSION[extension] || !fs.existsSync(full)) {
+					response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("não encontrado");
+					this.log(`servidor: GET ${url} -> 404`);
+					return;
+				}
+				const bytes = fs.readFileSync(full);
+				response.writeHead(200, {
+					"Content-Type": MIME_BY_EXTENSION[extension],
+					"Content-Length": bytes.length,
+					"Cache-Control": "no-store",
+				});
+				if (request.method === "HEAD") response.end();
+				else response.end(bytes);
+				this.log(`servidor: GET ${url} -> 200 (${bytes.length}B)`);
+			} catch (error) {
+				response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" }).end("erro");
+				this.log("servidor: erro -> " + (error && error.message ? error.message : error));
+			}
+		});
+
+		// Porta ocupada não pode derrubar o plugin: tenta as seguintes e avisa.
+		const base = Number(this.settings.port) || DEFAULT_SETTINGS.port;
+		let attempt = 0;
+		const tentar = () => {
+			const porta = base + attempt;
+			this.server.once("error", (error) => {
+				if (error && error.code === "EADDRINUSE" && attempt < 10) {
+					attempt++;
+					this.log(`porta ${porta} ocupada, tentando ${base + attempt}`);
+					tentar();
+					return;
+				}
+				this.log("servidor: falhou -> " + (error && error.message ? error.message : error));
+				this.aviso("AudioHtmlEmbed: não consegui subir o servidor local (veja o log).");
+			});
+			this.server.listen(porta, "127.0.0.1", () => {
+				this.effectivePort = porta;
+				this.log(`servidor no ar em 127.0.0.1:${porta}, servindo "${folder}"`);
+				if (porta !== base) this.aviso(`AudioHtmlEmbed: a porta ${base} estava ocupada — usando ${porta}. Retângulos antigos podem não carregar.`);
+			});
+		};
+		tentar();
+	}
+
+	stopServer() {
+		if (!this.server) return;
+		try {
+			this.server.close();
+		} catch (error) { /* noop */ }
+		this.server = null;
+		this.effectivePort = null;
+	}
+
+	/* ---- gravação ---------------------------------------------------------- */
 
 	async toggleRecording() {
 		try {
-			if (this.recorder.active) await this.stopRecording(true);
+			if (this.recorder.active) await this.stopAndPlot();
 			else await this.startRecording();
 		} catch (error) {
-			await this.logError("error in toggleRecording: " + (error && error.stack ? error.stack : error));
-			new Notice(`VoiceComment: unexpected error (see ${LOG_PATH}).`);
+			this.log("erro no toggle: " + (error && error.stack ? error.stack : error));
+			this.aviso("AudioHtmlEmbed: erro inesperado (veja o log do plugin).");
 		}
 	}
 
 	async startRecording() {
 		if (this.recorder.active) return;
-		if (typeof lamejs === "undefined" || typeof lamejs.Mp3Encoder !== "function") {
-			new Notice("VoiceComment: MP3 encoder missing (lamejs was not bundled into main.js).");
+		if (!this.targetDrawingView()) {
+			this.aviso("AudioHtmlEmbed: abra um desenho do Excalidraw para gravar e plotar.");
 			return;
 		}
-		const target = this.getTargetNote();
-		if (!target) {
-			new Notice("VoiceComment: open a note or a drawing to record into.");
+		if (typeof lamejs === "undefined" || typeof lamejs.Mp3Encoder !== "function") {
+			this.aviso("AudioHtmlEmbed: codificador MP3 ausente (o lamejs não entrou no main.js).");
 			return;
 		}
 		try {
 			await this.recorder.start(this.settings.bitrate);
 		} catch (error) {
-			await this.logError("microphone failure: " + (error && error.stack ? error.stack : error));
-			if (error && error.name === "NotAllowedError") {
-				new Notice("VoiceComment: microphone permission denied. Allow microphone access for Obsidian.");
-			} else if (error && error.name === "NotFoundError") {
-				new Notice("VoiceComment: no microphone found.");
-			} else {
-				new Notice("VoiceComment: could not access the microphone.");
-			}
+			this.log("microfone: " + (error && error.stack ? error.stack : error));
+			const denied = error && error.name === "NotAllowedError";
+			this.aviso(denied
+				? "AudioHtmlEmbed: permissão de microfone negada. Libere o microfone para o Obsidian."
+				: "AudioHtmlEmbed: não consegui acessar o microfone.");
 			return;
 		}
-		this.targetFile = target;
-		this.panel.show(target.name);
+		this.panel.show(`${this.nome()}: gravando… (o retângulo entra no desenho ao parar)`);
 		this.statusBar.setText("🔴 00:00");
 		this.tick();
 	}
 
-	togglePause() {
-		if (!this.recorder.active) return;
-		if (this.recorder.paused) this.recorder.resume();
-		else this.recorder.pause();
-		this.panel.setPaused(this.recorder.paused);
-		this.tick();
-	}
-
-	async stopRecording(save) {
-		if (!this.recorder.active) return;
-		const target = this.targetFile;
-		let result = null;
-		try {
-			result = save ? await this.recorder.stop() : (this.recorder.discard(), null);
-		} catch (error) {
-			await this.logError("error stopping the recording: " + (error && error.stack ? error.stack : error));
+	discardRecording() {
+		if (this.recorder.active) {
+			this.recorder.discard();
 		}
 		this.panel.hide();
 		this.statusBar.setText("");
-		this.targetFile = null;
+		this.aviso("AudioHtmlEmbed: gravação descartada.");
+	}
 
-		if (!save) {
-			new Notice("VoiceComment: recording discarded.");
-			return;
+	async stopAndPlot() {
+		if (!this.recorder.active) return;
+		let result = null;
+		try {
+			result = await this.recorder.stop();
+		} catch (error) {
+			this.log("erro ao parar: " + (error && error.stack ? error.stack : error));
 		}
+		this.panel.hide();
+		this.statusBar.setText("");
 		if (!result) {
-			new Notice("VoiceComment: nothing was recorded. See " + LOG_PATH);
+			this.aviso("AudioHtmlEmbed: nada foi gravado (veja o log do plugin).");
 			return;
 		}
 		try {
-			const file = await this.saveMp3(result.data);
-			const destination = await this.insertEmbed(file, target);
-			await this.log(`saved: ${file.path} (${result.data.byteLength}B via ${result.source}) ${destination}`);
-			new Notice(`VoiceComment: ${file.name} (${formatDuration(result.durationMs)}) ${destination}`);
+			const saved = await this.saveRecording(result.data);
+			this.log(`gravado: ${saved.mp3.path} + ${saved.html.path} (${result.data.byteLength}B, ${result.durationMs}ms, via ${result.source})`);
+			await this.plotPage(saved);
 		} catch (error) {
-			await this.logError("error saving/inserting: " + (error && error.stack ? error.stack : error));
-			new Notice("VoiceComment: could not save the recording.");
+			this.log("erro ao salvar/plotar: " + (error && error.stack ? error.stack : error));
+			this.aviso("AudioHtmlEmbed: não consegui salvar ou plotar a gravação.");
 		}
 	}
 
@@ -1116,420 +1169,85 @@ class VoiceCommentPlugin extends Plugin {
 			if (!this.app.vault.getAbstractFileByPath(current)) {
 				try {
 					await this.app.vault.createFolder(current);
-				} catch (error) { /* it may have been created in parallel */ }
+				} catch (error) { /* pode ter sido criada em paralelo */ }
 			}
 		}
 	}
 
-	async saveMp3(data) {
-		const folder = normalizePath(this.settings.folder || DEFAULT_SETTINGS.folder);
+	// Grava o MP3 e, ao lado, a página com o áudio embutido.
+	async saveRecording(bytes) {
+		const folder = this.folderPath();
 		await this.ensureFolder(folder);
-		const base = `${this.settings.prefix || DEFAULT_SETTINGS.prefix} ${timestamp()}`;
-		let path = normalizePath(`${folder}/${base}.mp3`);
+		const base = safeFileName(`VoiceComment ${stamp()}`);
+		let mp3Path = normalizePath(`${folder}/${base}.mp3`);
 		let suffix = 2;
-		while (this.app.vault.getAbstractFileByPath(path)) {
-			path = normalizePath(`${folder}/${base} (${suffix}).mp3`);
+		while (this.app.vault.getAbstractFileByPath(mp3Path)) {
+			mp3Path = normalizePath(`${folder}/${base} (${suffix}).mp3`);
 			suffix++;
 		}
-		const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-		return await this.app.vault.createBinary(path, buffer);
+		const name = mp3Path.split("/").pop();
+		const htmlPath = normalizePath(`${folder}/${name.replace(/\.mp3$/i, ".html")}`);
+		const page = buildRectanglePage(name, "audio/mpeg", bytesToBase64(bytes), bytes.length);
+
+		const mp3 = await this.app.vault.createBinary(mp3Path, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+		const html = await this.app.vault.create(htmlPath, page);
+		return { mp3, html, base };
 	}
 
-	measureAudioPlayerHeight() {
-		try {
-			const probe = document.body.createEl("audio", { cls: "voicecomment-probe" });
-			probe.controls = true;
-			probe.src = SILENT_WAV;
-			const height = probe.offsetHeight;
-			probe.remove();
-			return height > 0 ? height : 54;
-		} catch (error) {
-			return 54;
-		}
-	}
+	/* ---- plotar no desenho ------------------------------------------------- */
 
-	schedulePlayerActivation(delay = 800) {
-		if (this.playerTimer) window.clearTimeout(this.playerTimer);
-		if (this.playerRetry) window.clearTimeout(this.playerRetry);
-		this.playerRetry = null;
-		this.playerTimer = window.setTimeout(() => {
-			this.playerTimer = null;
-			this.activatePlayerWithRetries(0);
-		}, delay);
-	}
-
-	// A drawing that Obsidian reopens on startup is not ready yet when the workspace
-	// events fire, so keep trying for a few seconds instead of giving up silently.
-	async activatePlayerWithRetries(attempt) {
-		const activated = await this.activateLatestPlayer();
-		if (activated || attempt >= 6) return activated;
-		if (this.playerRetry) window.clearTimeout(this.playerRetry);
-		this.playerRetry = window.setTimeout(() => {
-			this.playerRetry = null;
-			this.activatePlayerWithRetries(attempt + 1);
-		}, 1500);
-		return 0;
-	}
-
-	// Excalidraw keeps a single active embeddable (appState.activeEmbeddable), so
-	// only one player can render at a time: the newest one wins. Returns 1 when a
-	// player is active, 0 when there is nothing to do yet (the caller retries).
-	async activateLatestPlayer() {
-		const leaf = this.app.workspace.activeLeaf;
-		if (!leaf || !leaf.view || typeof leaf.view.getViewType !== "function") return 0;
-		if (leaf.view.getViewType() !== "excalidraw") {
-			// Leaving the drawing resets the visit marker, so coming back — or reopening
-			// the note later — runs the activation pass (and the cycle) again.
-			this.cycledView = null;
-			this.cycledFile = null;
-			return 0;
+	// O elemento é um "embeddable" apontando para http://127.0.0.1:<porta>/<html>.
+	// O Excalidraw manda qualquer link com protocolo para um webview, e o próprio
+	// plugin o configura com autoplayPolicy=document-user-activation-required —
+	// ou seja, o áudio só toca se o usuário clicar.
+	async plotPage(saved, view) {
+		const alvo = view || this.targetDrawingView();
+		if (!alvo) {
+			this.aviso("AudioHtmlEmbed: abra o desenho para plotar o retângulo.");
+			return false;
 		}
 		const automate = window.ExcalidrawAutomate;
-		if (!automate || typeof automate.getAPI !== "function") return 0;
-
+		if (!automate || typeof automate.getAPI !== "function") {
+			this.aviso("AudioHtmlEmbed: o plugin do Excalidraw não está disponível.");
+			return false;
+		}
 		let ea = null;
 		try {
-			ea = automate.getAPI(leaf.view);
+			ea = automate.getAPI(alvo);
 		} catch (error) {
-			return 0;
-		}
-		if (!ea) return 0;
-
-		try {
-			const prefix = `${this.settings.prefix || DEFAULT_SETTINGS.prefix} `;
-			const players = (typeof ea.getViewElements === "function" ? ea.getViewElements() : [])
-				.filter((item) => item && item.type === "embeddable" && typeof item.link === "string"
-					&& /\.mp3\]\]$/i.test(item.link) && item.link.includes(prefix));
-			if (!players.length) return 0;
-
-			// Self-healing: keep the file name turned on inside every player, so the
-			// label survives whatever Excalidraw does with the rest of the scene.
-			await this.showPlayerFileNames();
-
-			players.sort((a, b) => (a.link < b.link ? 1 : -1));
-			const player = players[0];
-			const api = (typeof ea.getExcalidrawAPI === "function" ? ea.getExcalidrawAPI() : null) || leaf.view.excalidrawAPI;
-			if (!api || typeof api.updateScene !== "function") return 0;
-
-			const state = typeof api.getAppState === "function" ? api.getAppState() : null;
-			const active = state && state.activeEmbeddable && state.activeEmbeddable.element;
-			// Never fight an active player, and never touch the scene here: the render comes from
-			// onFileOpenHook, and an updateScene with the whole scene made the plugin rebuild the
-			// view (the "Cannot read properties of null (reading 'snapshot')" errors in the log).
-			if (active) return 1;
-			return 0;
-		} catch (error) {
-			await this.logError("could not re-activate the player in the drawing: " + (error && error.message ? error.message : error));
-			return 0;
-		} finally {
-			if (typeof ea.destroy === "function") ea.destroy();
-		}
-	}
-
-	// The player cannot live inside the canvas: Excalidraw mounts an embeddable only while
-	// it is the active one, so reopening a drawing turns every player into a box. A real
-	// Obsidian window has no such limit — the native audio player always renders there.
-	// This builds (or refreshes) a companion note with every recording of the active file
-	// and opens it in a popout window, which can be dragged around like any other window.
-	async openRecordingsWindow() {
-		const file = this.app.workspace.getActiveFile();
-		if (!file || file.extension !== "md") {
-			new Notice("VoiceComment: abra a nota do desenho antes de pedir a janela de audios.");
-			return 0;
-		}
-
-		const content = await this.app.vault.read(file);
-		const prefix = `${this.settings.prefix || DEFAULT_SETTINGS.prefix} `;
-		const links = [];
-		for (const match of content.matchAll(/\[\[([^\]]+)\]\]/g)) {
-			const link = match[1];
-			if (!/\.mp3$/i.test(link)) continue;
-			const nome = link.split("/").pop();
-			if (!nome.startsWith(prefix)) continue;
-			if (!links.includes(link)) links.push(link);
-		}
-		if (!links.length) {
-			new Notice("VoiceComment: nenhuma gravacao encontrada nesta nota.");
-			return 0;
-		}
-
-		const marca = "%% VoiceComment: lista de audios gerada automaticamente %%";
-		const linhas = [marca, "", `# Áudios de ${file.basename}`, ""];
-		linhas.push(`**${links.length}** gravação(ões) do VoiceComment em \`${file.path}\`.`);
-		for (const link of links) {
-			linhas.push("", `## 🎙 ${link.split("/").pop()}`, "", `![[${link}]]`);
-		}
-		const texto = linhas.join("\n") + "\n";
-
-		const pasta = file.parent && file.parent.path && file.parent.path !== "/" ? `${file.parent.path}/` : "";
-		const destino = normalizePath(`${pasta}${file.basename} - áudios.md`);
-		let nota = this.app.vault.getAbstractFileByPath(destino);
-		if (nota instanceof TFile) {
-			const atual = await this.app.vault.read(nota);
-			if (!atual.startsWith(marca)) {
-				new Notice(`VoiceComment: ${destino} já existe e não é meu — não vou sobrescrever.`);
-				return 0;
-			}
-			await this.app.vault.modify(nota, texto);
-		} else {
-			nota = await this.app.vault.create(destino, texto);
-		}
-		if (!(nota instanceof TFile)) return 0;
-
-		const leaf = this.app.workspace.openPopoutLeaf();
-		if (leaf) await leaf.openFile(nota);
-		await this.log(`opened the recordings window for ${file.path} (${links.length} audio(s))`);
-		return links.length;
-	}
-
-	// The Excalidraw plugin mounts an embeddable when the element is CREATED, so the way to
-	// bring a player back is to recreate the element: delete the original and add a fresh one
-	// carrying over geometry, colours, link and mdProps. Same replace pattern the Excalidraw
-	// plugin itself uses when it converts an element.
-	async recreatePlayersIn(ea, somenteId) {
-		if (!ea || typeof ea.addEmbeddable !== "function" || typeof ea.getViewElements !== "function") return 0;
-		const prefix = `${this.settings.prefix || DEFAULT_SETTINGS.prefix} `;
-		const achar = () => ea.getViewElements().filter((item) => item && item.type === "embeddable"
-			&& typeof item.link === "string" && /\.mp3\]\]$/i.test(item.link) && item.link.includes(prefix));
-		const alvos = () => {
-			const todos = achar();
-			return somenteId ? todos.filter((item) => item.id === somenteId) : todos;
-		};
-
-		// Inside onFileOpenHook the hook fires before the React canvas commits, so the view is
-		// still empty at that instant. The plugin awaits this hook, so waiting here is safe:
-		// the recreate then lands before the canvas paints — the only window that mounts.
-		let players = alvos();
-		for (let tentativa = 0; !players.length && tentativa < 14; tentativa++) {
-			await new Promise((resolve) => window.setTimeout(resolve, 150));
-			players = alvos();
-		}
-		if (!players.length) return 0;
-
-		const links = players.map((item) => item.link);
-		if (typeof ea.copyViewElementsToEAforEditing === "function") {
-			ea.copyViewElementsToEAforEditing(players);
-			for (const player of players) {
-				const copia = ea.getElement(player.id);
-				if (copia) copia.isDeleted = true;
-			}
-		}
-		let recriados = 0;
-		for (const player of players) {
-			if (typeof ea.setStyle === "function") {
-				ea.setStyle({
-					strokeColor: player.strokeColor,
-					backgroundColor: player.backgroundColor,
-					fillStyle: player.fillStyle,
-					strokeWidth: player.strokeWidth,
-					strokeStyle: player.strokeStyle,
-					roughness: player.roughness,
-					opacity: player.opacity,
-				});
-			}
-			const mdProps = player.customData && player.customData.mdProps ? player.customData.mdProps : undefined;
-			const novoId = ea.addEmbeddable(player.x, player.y, player.width, player.height, player.link, undefined, mdProps);
-			if (novoId) recriados++;
-		}
-		// save = false on purpose: saving the file inside the recreate makes the Excalidraw
-		// plugin treat it as an external change and rebuild the view, which kills the render.
-		if (!recriados) return recriados;
-		await ea.addElementsToView(false, false, false);
-
-		// Creating alone is not enough: a player has only ever rendered when creation came
-		// together with select + activeEmbeddable (what the insert path does). Walk the fresh
-		// players marking one active at a time, oldest first, so the newest ends up active.
-		const api = (typeof ea.getExcalidrawAPI === "function" ? ea.getExcalidrawAPI() : null) || null;
-		if (api && typeof api.updateScene === "function") {
-			const novos = achar().filter((item) => links.includes(item.link));
-			// The player the user clicked (this.preferidoLink) goes LAST, so it ends up active.
-			const preferido = this.preferidoLink ? novos.find((item) => item.link === this.preferidoLink) : null;
-			const fila = novos.slice().reverse().filter((item) => !preferido || item.link !== preferido.link);
-			if (preferido) fila.push(preferido);
-			this.preferidoLink = null;
-			for (const novo of fila) {
-				if (typeof api.selectElements === "function") api.selectElements([novo]);
-				await new Promise((resolve) => window.setTimeout(resolve, 400));
-				api.updateScene({
-					appState: { activeEmbeddable: { element: novo, state: "active" } },
-					captureUpdate: "NEVER",
-				});
-				await new Promise((resolve) => window.setTimeout(resolve, 400));
-			}
-		}
-		return recriados;
-	}
-
-	async recreatePlayers() {
-		const leaf = this.app.workspace.activeLeaf;
-		if (!leaf || !leaf.view || typeof leaf.view.getViewType !== "function") return 0;
-		if (leaf.view.getViewType() !== "excalidraw") return 0;
-		const automate = window.ExcalidrawAutomate;
-		if (!automate || typeof automate.getAPI !== "function") return 0;
-
-		let ea = null;
-		try {
-			ea = automate.getAPI(leaf.view);
-		} catch (error) {
-			return 0;
-		}
-		try {
-			const recriados = await this.recreatePlayersIn(ea);
-			if (recriados) await this.log(`recreated ${recriados} player(s) in the drawing`);
-			return recriados;
-		} catch (error) {
-			await this.logError("could not recreate the players: " + (error && error.message ? error.message : error));
-			return 0;
-		} finally {
-			if (ea && typeof ea.destroy === "function") ea.destroy();
-		}
-	}
-
-	// The Excalidraw plugin calls — and awaits — ea.onFileOpenHook right after loading a
-	// drawing: inside its own load cycle, before the canvas paints. That is the only window
-	// where a freshly created embeddable still mounts, so the players are recreated there.
-	installFileOpenHook() {
-		const automate = window.ExcalidrawAutomate;
-		if (!automate) return false;
-		if (automate.onFileOpenHook && automate.onFileOpenHook.__voicecomment) return true;
-
-		const anterior = automate.onFileOpenHook;
-		const hook = async (dados) => {
-			if (typeof anterior === "function") {
-				try {
-					await anterior(dados);
-				} catch (error) {
-					// a broken hook from someone else must not take ours down
-				}
-			}
-			try {
-				const recriados = await this.recreatePlayersIn(dados && dados.ea);
-				if (recriados) await this.log(`onFileOpenHook: recreated ${recriados} player(s) when the drawing opened`);
-			} catch (error) {
-				await this.logError("onFileOpenHook failed: " + (error && error.message ? error.message : error));
-			}
-		};
-		hook.__voicecomment = true;
-		automate.onFileOpenHook = hook;
-		return true;
-	}
-
-
-	// Turns the file name on for every player of the drawing. The flag lives inside
-	// the embeddable itself, so it survives saving and reopening — unlike extra
-	// elements placed next to the player, which Excalidraw drops.
-	async showPlayerFileNames() {
-		const leaf = this.app.workspace.activeLeaf;
-		if (!leaf || !leaf.view || typeof leaf.view.getViewType !== "function") return 0;
-		if (leaf.view.getViewType() !== "excalidraw") return 0;
-		const automate = window.ExcalidrawAutomate;
-		if (!automate || typeof automate.getAPI !== "function") return 0;
-
-		let ea = null;
-		try {
-			ea = automate.getAPI(leaf.view);
-		} catch (error) {
-			return 0;
-		}
-		if (!ea) return 0;
-
-		let changed = 0;
-		try {
-			const prefix = `${this.settings.prefix || DEFAULT_SETTINGS.prefix} `;
-			const players = (typeof ea.getViewElements === "function" ? ea.getViewElements() : [])
-				.filter((item) => item && item.type === "embeddable" && typeof item.link === "string"
-					&& /\.mp3\]\]$/i.test(item.link) && item.link.includes(prefix));
-			if (!players.length) return 0;
-
-			if (typeof ea.copyViewElementsToEAforEditing === "function") {
-				ea.copyViewElementsToEAforEditing(players);
-				for (const player of players) {
-					const element = typeof ea.getElement === "function" ? ea.getElement(player.id) : null;
-					if (!element) continue;
-					const mdProps = Object.assign({}, (element.customData && element.customData.mdProps) || {});
-					if (mdProps.filenameVisible && mdProps.useObsidianDefaults === false) continue;
-					mdProps.filenameVisible = true;
-					mdProps.useObsidianDefaults = false;
-					element.customData = Object.assign({}, element.customData || {}, { mdProps });
-					changed++;
-				}
-			}
-			if (changed) {
-				await ea.addElementsToView(false, false, false);
-				await this.log(`turned the file name on for ${changed} player(s) in the drawing`);
-			}
-			return changed;
-		} catch (error) {
-			await this.logError("could not turn the file name on: " + (error && error.message ? error.message : error));
-			return changed;
-		} finally {
-			if (typeof ea.destroy === "function") ea.destroy();
-		}
-	}
-
-	// Excalidraw exposes window.ExcalidrawAutomate.getAPI(view), which returns a
-	// NEW instance bound to that view — the global instance can be plugin-less
-	// (setView then throws "Cannot read properties of null (reading 'app')").
-	// An MP3 becomes an "embeddable" element, rendered with Obsidian's audio player.
-	async insertIntoExcalidraw(audioFile, noteFile) {
-		const automate = window.ExcalidrawAutomate;
-		if (!noteFile || !automate || typeof automate.getAPI !== "function") return false;
-
-		const leaf = this.app.workspace.getLeavesOfType("excalidraw")
-			.find((candidate) => candidate.view && candidate.view.file && candidate.view.file.path === noteFile.path);
-		if (!leaf) return false;
-
-		let ea = null;
-		try {
-			ea = automate.getAPI(leaf.view);
-		} catch (error) {
-			await this.logError("could not get the Excalidraw API: " + (error && error.message ? error.message : error));
+			this.log("sem API do desenho: " + (error && error.message ? error.message : error));
 		}
 		if (!ea) return false;
 
+		const width = Number(this.settings.rectWidth) || DEFAULT_SETTINGS.rectWidth;
+		const height = Number(this.settings.rectHeight) || DEFAULT_SETTINGS.rectHeight;
+		const url = `${this.serviceBase()}/${encodeURIComponent(saved.html.name)}`;
 		try {
 			if (typeof ea.setStyle === "function") {
-				ea.setStyle({ strokeColor: "transparent", backgroundColor: "transparent" });
+				// A página não pinta fundo: a cor que aparece é a do elemento, escolhida
+				// aqui (padrão para os novos) ou no painel do Excalidraw, retângulo a
+				// retângulo. "transparent" mantém o visual antigo.
+				ea.setStyle({
+					strokeColor: this.settings.rectStrokeColor || "transparent",
+					backgroundColor: this.settings.rectBackgroundColor || "transparent",
+				});
 			}
-			const height = this.measureAudioPlayerHeight();
-			let center = null;
+			let point = null;
 			if (typeof ea.getViewCenterPosition === "function") {
 				try {
-					center = ea.getViewCenterPosition();
+					point = ea.getViewCenterPosition();
 				} catch (error) {
-					center = null;
+					point = null;
 				}
 			}
-			if (!center && leaf.view.currentPosition) center = leaf.view.currentPosition;
-			const x = center ? center.x - EMBED_WIDTH / 2 : 0;
-			const y = center ? center.y - height / 2 : 0;
+			const x = point ? point.x - width / 2 : 0;
+			const y = point ? point.y - height / 2 : 0;
+			const id = ea.addEmbeddable(x, y, width, height, url, undefined, undefined);
+			const saved_ = await ea.addElementsToView(false, true, true);
+			if (saved_ === false) return false;
 
-			const playerLink = `[[${audioFile.path}]]`;
-			// The 7th argument of addEmbeddable is embeddableCustomData (mdProps); the
-			// 6th is a TFile. filenameVisible + useObsidianDefaults:false is what makes
-			// the player show the file name on the canvas, and the flag lives inside the
-			// element — so it survives saving and reopening.
-			const mdProps = {
-				useObsidianDefaults: false,
-				backgroundMatchCanvas: false,
-				backgroundMatchElement: true,
-				backgroundColor: "#fff",
-				backgroundOpacity: 60,
-				borderMatchElement: true,
-				borderColor: "#fff",
-				borderOpacity: 0,
-				filenameVisible: true,
-			};
-			const elementId = ea.addEmbeddable(x, y, EMBED_WIDTH, height, playerLink, undefined, mdProps);
-			const saved = await ea.addElementsToView(false, true, true);
-			if (saved === false) return false;
-
-			// Selecting the element and marking it active is what makes the player
-			// render instead of staying a placeholder.
-			const api = (typeof ea.getExcalidrawAPI === "function" ? ea.getExcalidrawAPI() : null) || leaf.view.excalidrawAPI;
-			const element = elementId && typeof ea.getViewElements === "function"
-				? ea.getViewElements().find((item) => item.id === elementId)
-				: null;
+			const api = (typeof ea.getExcalidrawAPI === "function" ? ea.getExcalidrawAPI() : null) || alvo.excalidrawAPI;
+			const element = id && typeof ea.getViewElements === "function" ? ea.getViewElements().find((item) => item.id === id) : null;
 			if (api && element) {
 				try {
 					if (typeof api.selectElements === "function") api.selectElements([element]);
@@ -1537,43 +1255,158 @@ class VoiceCommentPlugin extends Plugin {
 						appState: { activeEmbeddable: { element, state: "active" } },
 						captureUpdate: "NEVER",
 					});
-				} catch (error) {
-					await this.logError("inserted into the drawing, but could not activate the player: " + (error && error.message ? error.message : error));
-				}
+				} catch (error) { /* o elemento já está no desenho */ }
 			}
+			this.lastPage = saved;
+			this.aviso(`AudioHtmlEmbed: retângulo plotado (${saved.html.name}).`);
+			this.log(`plotado: ${url}`);
 			return true;
 		} catch (error) {
-			await this.logError("failed to insert into the drawing: " + (error && error.stack ? error.stack : error));
+			this.log("erro ao plotar: " + (error && error.stack ? error.stack : error));
+			this.aviso("AudioHtmlEmbed: não consegui plotar o retângulo.");
 			return false;
 		} finally {
 			if (typeof ea.destroy === "function") ea.destroy();
 		}
 	}
+}
 
-	async insertEmbed(audioFile, noteFile) {
-		if (await this.insertIntoExcalidraw(audioFile, noteFile)) return "in the drawing";
+// ---- configurações ---------------------------------------------------------
 
-		const notePath = noteFile && noteFile.path ? noteFile.path : "";
-		const link = this.app.fileManager.generateMarkdownLink(audioFile, notePath || "/");
-		const embed = `!${link}`;
+class AudioHtmlEmbedSettingTab extends PluginSettingTab {
+	constructor(app, plugin) {
+		super(app, plugin);
+		this.plugin = plugin;
+	}
 
-		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-		if (this.settings.insertPosition === "cursor" && view && view.getMode() === "source") {
-			view.editor.replaceSelection(`${embed}\n`);
-			return "in the note (cursor)";
-		}
+	// O seletor de cor do Obsidian só aceita hex; o padrão "transparent" não é hex,
+	// então o seletor mostra um tom de referência sem esconder o valor guardado
+	// (que continua transparente até você escolher uma cor).
+	corValida(valor, referencia) {
+		return /^#[0-9a-fA-F]{6}$/.test(String(valor || "")) ? valor : referencia;
+	}
 
-		const target = (view && view.file) || noteFile || this.app.workspace.getActiveFile();
-		if (target && target.extension === "md") {
-			await this.app.vault.process(target, (content) => {
-				const separator = content.length === 0 || content.endsWith("\n") ? "" : "\n";
-				return `${content}${separator}${embed}\n`;
-			});
-			return "in the note (end)";
-		}
+	display() {
+		const { containerEl } = this;
+		containerEl.empty();
 
-		return `at ${audioFile.path}`;
+		new Setting(containerEl).setName("Gravação").setHeading();
+
+		new Setting(containerEl)
+			.setName("Pasta dos áudios")
+			.setDesc("Onde ficam o MP3 e a página HTML. É esta pasta que o servidor local serve.")
+			.addText((text) => text
+				.setPlaceholder(DEFAULT_SETTINGS.folder)
+				.setValue(this.plugin.settings.folder)
+				.onChange(async (value) => {
+					this.plugin.settings.folder = value.trim() || DEFAULT_SETTINGS.folder;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName("Qualidade do MP3")
+			.setDesc("Mono. 128 kb/s é folgado para voz.")
+			.addDropdown((dropdown) => dropdown
+				.addOptions({ "64": "64 kb/s", "96": "96 kb/s", "128": "128 kb/s", "192": "192 kb/s" })
+				.setValue(String(this.plugin.settings.bitrate))
+				.onChange(async (value) => {
+					this.plugin.settings.bitrate = Number(value);
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl).setName("Retângulo no desenho").setHeading();
+
+		new Setting(containerEl)
+			.setName("Largura")
+			.addText((text) => text
+				.setValue(String(this.plugin.settings.rectWidth))
+				.onChange(async (value) => {
+					const n = Number(value);
+					if (Number.isFinite(n) && n > 80) {
+						this.plugin.settings.rectWidth = n;
+						await this.plugin.saveSettings();
+					}
+				}));
+
+		new Setting(containerEl)
+			.setName("Altura")
+			.addText((text) => text
+				.setValue(String(this.plugin.settings.rectHeight))
+				.onChange(async (value) => {
+					const n = Number(value);
+					if (Number.isFinite(n) && n > 60) {
+						this.plugin.settings.rectHeight = n;
+						await this.plugin.saveSettings();
+					}
+				}));
+
+		new Setting(containerEl)
+			.setName("Cor de fundo do retângulo")
+			.setDesc("A página não pinta fundo: esta é a cor padrão dos retângulos novos (dá para mudar cada um depois, no painel do Excalidraw). O texto do player se adapta com sombra.")
+			.addColorPicker((picker) => picker
+				.setValue(this.corValida(this.plugin.settings.rectBackgroundColor, "#e8e8ef"))
+				.onChange(async (value) => {
+					this.plugin.settings.rectBackgroundColor = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName("Cor da borda do retângulo")
+			.addColorPicker((picker) => picker
+				.setValue(this.corValida(this.plugin.settings.rectStrokeColor, "#4b4bd6"))
+				.onChange(async (value) => {
+					this.plugin.settings.rectStrokeColor = value;
+					await this.plugin.saveSettings();
+				}))
+			.addButton((button) => button
+				.setButtonText("Sem cor (transparente)")
+				.onClick(async () => {
+					this.plugin.settings.rectBackgroundColor = "transparent";
+					this.plugin.settings.rectStrokeColor = "transparent";
+					await this.plugin.saveSettings();
+					this.display();
+				}));
+
+		new Setting(containerEl).setName("Servidor local").setHeading();
+
+		new Setting(containerEl)
+			.setName("Porta")
+			.setDesc(`Hoje: ${this.plugin.serviceBase()}. Só esta máquina acessa (127.0.0.1). Trocar a porta quebra os retângulos já plotados.`)
+			.addText((text) => text
+				.setValue(String(this.plugin.settings.port))
+				.onChange(async (value) => {
+					const n = Number(value);
+					if (Number.isInteger(n) && n > 1023 && n < 65536) {
+						this.plugin.settings.port = n;
+						await this.plugin.saveSettings();
+					}
+				}))
+			.addButton((button) => button
+				.setButtonText("Reiniciar servidor")
+				.onClick(() => {
+					this.plugin.stopServer();
+					this.plugin.startServer();
+					this.plugin.aviso("AudioHtmlEmbed: servidor reiniciado.");
+				}));
+
+		new Setting(containerEl)
+			.setName("Ícone de microfone na barra lateral")
+			.addToggle((toggle) => toggle
+				.setValue(this.plugin.settings.showRibbonIcon)
+				.onChange(async (value) => {
+					this.plugin.settings.showRibbonIcon = value;
+					await this.plugin.saveSettings();
+					this.plugin.refreshRibbonIcon();
+				}))
+			.addText((text) => text
+				.setPlaceholder("mic")
+				.setValue(this.plugin.settings.ribbonIconName || "mic")
+				.onChange(async (value) => {
+					this.plugin.settings.ribbonIconName = value.trim() || "mic";
+					await this.plugin.saveSettings();
+					this.plugin.refreshRibbonIcon();
+				}));
 	}
 }
 
-module.exports = VoiceCommentPlugin;
+module.exports = AudioHtmlEmbedPlugin;

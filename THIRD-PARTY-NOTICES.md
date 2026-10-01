@@ -1,6 +1,6 @@
 # Third-party notices
 
-VoiceComment bundles the following library inside the distributed `main.js`. The
+VoiceComment 2.0 bundles the following library inside the distributed `main.js`. The
 library is included **unmodified**; its source, license and the one-line build
 step that concatenates it are all in this repository, so it can be inspected,
 replaced or rebuilt freely.
@@ -9,15 +9,15 @@ replaced or rebuilt freely.
 |---|---|---|---|---|
 | lamejs | 1.2.1 | LGPL-3.0 | https://github.com/zhuker/lamejs | MP3 encoding in the browser |
 
-`lame.min.js` in this repository is the unmodified file published on npm as
-`lamejs@1.2.1`. `build.ps1` concatenates it with `src/voicecomment.js` to
+`src/lame.min.js` in this repository is the unmodified file published on npm as
+`lamejs@1.2.1`. `build.ps1` concatenates it with `src/audiohtml.js` to
 produce `main.js`:
 
 ```powershell
-# main.js = lame.min.js + "\n" + src/voicecomment.js
+# main.js = src/lame.min.js + "\n" + src/audiohtml.js
 ```
 
-To rebuild with a different version of lamejs, replace `lame.min.js` and run the
+To rebuild with a different version of lamejs, replace `src/lame.min.js` and run the
 build script — no other change is required.
 
 lamejs is a JavaScript port of the LAME MP3 encoder (LGPL). The full text of the
