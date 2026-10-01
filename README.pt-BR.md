@@ -4,6 +4,10 @@
 
 Plugin do Obsidian que **grava um áudio e plota no desenho um retângulo com a página HTML que carrega esse áudio embutido** — sempre parado, e o retângulo volta quando o desenho é reaberto.
 
+![Uma gravação parada no desenho como um retângulo que a toca](images/voice-comment-2-0-rectangle.png)
+
+*Um comentário por ideia, parado no próprio desenho.*
+
 ## Uso
 
 1. Abra um desenho do Excalidraw.

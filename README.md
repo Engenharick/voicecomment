@@ -6,6 +6,10 @@ The rectangle shows a self-contained HTML page with the audio inside — generat
 
 No ffmpeg, no Python, no cloud: the MP3 encoder ships inside the plugin.
 
+![A recording parked on an Excalidraw drawing as a rectangle that plays it](images/voice-comment-2-0-rectangle.png)
+
+*One comment per idea, parked on the drawing itself.*
+
 ## Why
 
 Neither Excalidraw nor its plugin can record audio, and even embedding an existing audio file in a drawing is a manual workaround — [issue #2278](https://github.com/zsviczian/obsidian-excalidraw-plugin/issues/2278) is still open, and the suggested workaround is to add a card and drop an audio link into it. VoiceComment does that for you, with the recording included: one comment per idea, parked exactly where you were.
